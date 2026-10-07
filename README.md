@@ -34,3 +34,15 @@ Basic overview of each file in this module.
 ## main.cpp
 
 Entry point / test file — creates sample units, facilities, and supplies to demonstrate the classes working together.
+
+## Configuration
+
+Copy `include/Config.example.hpp` to `include/Config.local.hpp` and set `kContact` to your project URL or contact information:
+```cpp
+namespace rapidaid::config {
+    constexpr const char* kContact = "<your project URL or contact>";
+}
+```
+`include/Config.local.hpp` is git-ignored and must never be committed to the repository. This contact information is sent to OpenStreetMap services in the `User-Agent` header.
+
+
