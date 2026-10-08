@@ -1,2 +1,4 @@
 include/Config.local.hpp
-tests/
+build/
+*.o
+*.exe

@@ -45,4 +45,30 @@ namespace rapidaid::config {
 ```
 `include/Config.local.hpp` is git-ignored and must never be committed to the repository. This contact information is sent to OpenStreetMap services in the `User-Agent` header.
 
+## Building
 
+Build requirements:
+- MSYS2 MinGW-w64 64-bit (`g++` C++17, `make`)
+- libcurl
+
+### Build Commands
+
+```bash
+# Build all tests
+make tests
+
+# Build a specific test by name (e.g., test_http)
+make test_http
+
+# Build and run offline tests only
+make offline
+
+# Build the main application (requires main.cpp)
+make app
+
+# Clean build artifacts
+make clean
+
+# Build with custom include directory (e.g. dummy config)
+make EXTRA_INCLUDES=-I/tmp/dummycfg tests
+```
