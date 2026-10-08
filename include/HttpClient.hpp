@@ -7,6 +7,8 @@
 namespace rapidaid::net{
     class HttpClient{
         public:
+            // returns the percent-encoded form of text, or "" on failure.
+            static std::string urlEncode(const std::string& text);
             static std::string get(const std::string& url);
             static std::string post(const std::string& url, const std::string& data);
         private:

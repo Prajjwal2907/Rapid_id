@@ -79,6 +79,26 @@ namespace rapidaid::net {
         return response;
     }
 
+    std::string HttpClient::urlEncode(const std::string& text) {
+        static const CurlGlobalGuard curlGlobalGuard;
+
+        CURL* handle = curl_easy_init();
+        if (!handle) {
+            return "";
+        }
+
+        char* escaped = curl_easy_escape(handle, text.c_str(), static_cast<int>(text.length()));
+        if (!escaped) {
+            curl_easy_cleanup(handle);
+            return "";
+        }
+
+        std::string result(escaped);
+        curl_free(escaped);
+        curl_easy_cleanup(handle);
+        return result;
+    }
+
     std::string HttpClient::get(const std::string& url) {
         return performRequest(url);
     }
