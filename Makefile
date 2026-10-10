@@ -2,7 +2,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Iinclude $(EXTRA_INCLUDES)
 LDLIBS ?= -lcurl
 
-SRCS = $(filter-out src/main.cpp,$(wildcard src/*.cpp))
+SRCS = $(filter-out src/main.cpp src/priority_queue.cpp,$(wildcard src/*.cpp))
 LIB_OBJS = $(patsubst src/%.cpp,build/%.o,$(SRCS))
 DEPS = $(LIB_OBJS:.o=.d) build/main.d
 
