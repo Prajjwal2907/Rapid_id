@@ -1,13 +1,15 @@
 #pragma once
 
+#include "Fire_truck.hpp"
+
 #include <string>
+#include <vector>
 
 namespace rapidaid::service {
 
-class Shelter {
+class FireStation {
 public:
-    Shelter(int id, std::string name, double latitude, double longitude,
-            int capacity, int occupied = 0);
+    FireStation(int id, std::string name, double latitude, double longitude);
 
     int getId() const;
     const std::string& getName() const;
@@ -15,13 +17,10 @@ public:
     double getLongitude() const;
     long long getGraphNodeId() const;
     void setGraphNodeId(long long graphNodeId);
-    int getCapacity() const;
-    int getOccupied() const;
 
-    int availableSpace() const;
-    bool admit(int count);
-    void leave(int count);
-    bool isFull() const;
+    void addTruck(FireTruck truck);
+    std::vector<FireTruck*> getAvailableTrucks();
+    FireTruck* findTruckById(int id);
 
 private:
     int id;
@@ -29,8 +28,7 @@ private:
     double latitude;
     double longitude;
     long long graphNodeId = -1;
-    int capacity;
-    int occupied;
+    std::vector<FireTruck> trucks;
 };
 
 }
