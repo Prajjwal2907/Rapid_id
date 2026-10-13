@@ -1,4 +1,4 @@
-﻿#include "OverpassClient.hpp"
+#include "OverpassClient.hpp"
 #include "HttpClient.hpp"
 #include "json.hpp"
 
@@ -182,22 +182,22 @@ std::vector<Place> OverpassClient::parseResponse(const std::string& body, Catego
     return places;
 }
 
-std::vector<Place> OverpassClient::findNearby(Category category, double lat, double lon, int radiusMeters) {
+std::string OverpassClient::fetchRaw(Category category, double lat, double lon, int radiusMeters) {
     if (radiusMeters < 1 || radiusMeters > 50000) {
-        return {};
+        return "";
     }
     if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
-        return {};
+        return "";
     }
 
     std::string query = buildQuery(category, lat, lon, radiusMeters);
     if (query.empty()) {
-        return {};
+        return "";
     }
 
     std::string body = buildRequestBody(query);
     if (body.empty()) {
-        return {};
+        return "";
     }
 
     static const std::string overpassUrl = "https://overpass-api.de/api/interpreter";
@@ -220,11 +220,11 @@ std::vector<Place> OverpassClient::findNearby(Category category, double lat, dou
         }
     }
 
-    if (response.empty()) {
-        return {};
-    }
+    return response;
+}
 
-    return parseResponse(response, category);
+std::vector<Place> OverpassClient::findNearby(Category category, double lat, double lon, int radiusMeters) {
+    return parseResponse(fetchRaw(category, lat, lon, radiusMeters), category);
 }
 
 } // namespace rapidaid::osm

@@ -1,4 +1,4 @@
-﻿#ifndef RAPIDAID_GEO_GEOCODER_HPP
+#ifndef RAPIDAID_GEO_GEOCODER_HPP
 #define RAPIDAID_GEO_GEOCODER_HPP
 
 #include <string>
@@ -15,6 +15,10 @@ namespace rapidaid::geo {
     public:
         // Geocodes a free-text query via Nominatim. Returns std::nullopt on network failure, parse failure, or no results.
         static std::optional<Location> geocode(const std::string& query);
+
+        // Fetches Nominatim JSON body for a query. Returns the raw Nominatim JSON body, or "" on failure.
+        // Rejects empty or whitespace-only queries without making a network call.
+        static std::string fetchRaw(const std::string& query);
 
         // Pure function, no network. Parses a Nominatim format=json response body (a JSON array).
         // Returns nullopt on empty string, invalid JSON, empty array, or missing/non-numeric lat/lon.
