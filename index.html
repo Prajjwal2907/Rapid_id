@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RapidAid - Emergency Dispatch System</title>
+  <!-- Leaflet Map Integration -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body style="font-family: sans-serif; margin: 20px; line-height: 1.5;">
+
+  <!-- Header & Navigation -->
+  <header style="border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px;">
+    <h1 style="margin: 0 0 10px 0;">RapidAid Emergency Dispatch System</h1>
+    <div id="header-bar" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+      <div>
+        <span id="backend-status" style="padding: 3px 8px; background: #eee; border: 1px solid #ccc; font-size: 13px;">Checking backend...</span>
+        <button id="btn-toggle-apikey-settings" style="margin-left: 8px; font-size: 12px; padding: 3px 8px; cursor: pointer;">Map API Key: <span id="apikey-badge">Checking...</span></button>
+        <span id="session-info" style="margin-left: 15px; font-weight: bold; display: none;">
+          Logged in as: <span id="user-display"></span> (<span id="role-display"></span>)
+        </span>
+      </div>
+      <nav id="main-nav" style="display: none; margin-top: 5px;">
+        <button id="nav-incidents" style="margin-right: 8px; font-weight: bold;">Incident Reports</button>
+        <button id="nav-area" style="margin-right: 8px;">Area Map Setup</button>
+        <button id="nav-stats" style="margin-right: 8px;">Past Dispatch Stats</button>
+        <button id="nav-logout" style="background: #fee; border-color: #c00;">Logout</button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- API Key Setup Banner / Dialog -->
+  <div id="apikey-banner" style="display: none; background: #eef5fc; border: 2px solid #3366cc; border-radius: 4px; padding: 15px; margin-bottom: 20px;">
+    <h3 style="margin-top: 0; color: #003366;">Map Service CARTO API Key Setup</h3>
+    <p style="margin: 5px 0 10px 0;">
+      A CARTO API key is required to stream live map tiles. When entered, it is saved privately to your local storage and ignored by git (see <code>config.example.json</code>).
+    </p>
+    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+      <input type="text" id="apikey-input" placeholder="Paste your CARTO API Key here" style="flex: 1; min-width: 260px; padding: 8px; box-sizing: border-box;">
+      <button id="btn-save-apikey" style="padding: 8px 18px; font-weight: bold; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Save API Key</button>
+      <button id="btn-download-config" style="padding: 8px 14px; background: #17a2b8; color: white; border: none; border-radius: 3px; cursor: pointer;">Save to config.json</button>
+      <button id="btn-dismiss-apikey" style="padding: 8px 12px; background: #e2e6ea; border: 1px solid #ccc; border-radius: 3px; cursor: pointer;">Hide</button>
+    </div>
+    <div id="apikey-feedback" style="margin-top: 8px; font-weight: bold; font-size: 13px;"></div>
+  </div>
+
+  <!-- ========================================== -->
+  <!-- 1. Authentication View (Login / Signup)    -->
+  <!-- ========================================== -->
+  <main id="auth-view" style="max-width: 480px; margin: 40px auto; border: 1px solid #ccc; padding: 25px;">
+    <h2 style="margin-top: 0;">RapidAid Access Portal</h2>
+    <div style="margin-bottom: 15px;">
+      <button id="tab-login" style="padding: 8px 16px; font-weight: bold;">Login</button>
+      <button id="tab-signup" style="padding: 8px 16px;">Sign Up</button>
+    </div>
+
+    <!-- Login Form -->
+    <div id="login-container">
+      <h3>Dispatcher Login</h3>
+      <form id="form-login" onsubmit="return false;">
+        <p>
+          <label for="login-username">Username:</label><br>
+          <input type="text" id="login-username" value="admin" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+        </p>
+        <p>
+          <label for="login-password">Password:</label><br>
+          <input type="password" id="login-password" value="admin123" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+        </p>
+        <p>
+          <button id="btn-login" style="padding: 8px 20px; font-size: 15px;">Log In</button>
+        </p>
+        <p style="font-size: 12px; color: #666;">
+          Default credentials: <b>admin</b> / <b>admin123</b>
+        </p>
+      </form>
+    </div>
+
+    <!-- Signup Form -->
+    <div id="signup-container" style="display: none;">
+      <h3>Register New Account</h3>
+      <form id="form-signup" onsubmit="return false;">
+        <p>
+          <label for="signup-username">New Username:</label><br>
+          <input type="text" id="signup-username" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+        </p>
+        <p>
+          <label for="signup-password">New Password:</label><br>
+          <input type="password" id="signup-password" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+        </p>
+        <p>
+          <label for="signup-role">Role:</label><br>
+          <select id="signup-role" style="width: 100%; padding: 6px;">
+            <option value="dispatcher" selected>Dispatcher</option>
+            <option value="admin">Administrator</option>
+          </select>
+        </p>
+        <p>
+          <button id="btn-signup" style="padding: 8px 20px; font-size: 15px;">Create Account</button>
+        </p>
+      </form>
+    </div>
+
+    <!-- Auth Feedback Message -->
+    <div id="auth-feedback" style="margin-top: 15px; font-weight: bold; min-height: 20px;"></div>
+  </main>
+
+  <!-- ========================================== -->
+  <!-- 2. Main App View Container                 -->
+  <!-- ========================================== -->
+  <div id="app-view" style="display: none;">
+
+    <!-- ========================================== -->
+    <!-- 2A. Area Setup Menu (Side-by-Side Map)     -->
+    <!-- ========================================== -->
+    <section id="section-area" style="display: none;">
+      <div id="area-alert" style="background: #fff3cd; border: 1px solid #ffeeba; padding: 12px; margin-bottom: 20px;">
+        <strong>Notice:</strong> <span id="area-alert-text">No permanent area GeoJSON detected. Please configure the operational area under your charge.</span>
+      </div>
+
+      <h2>Operational Area & Zone Map Configuration</h2>
+      <p>Enter the area details to geocode, preview the boundary and facilities side by side, and generate the permanent GeoJSON network.</p>
+
+      <!-- Side-by-Side Container -->
+      <div style="display: flex; flex-direction: row; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
+        
+        <!-- Left Column: Form & Controls -->
+        <div style="flex: 1; min-width: 320px; border: 1px solid #ccc; padding: 18px;">
+          <h3>Area Parameters</h3>
+          <form id="form-area" onsubmit="return false;">
+            <p>
+              <label for="area-name"><strong>Area / Region Name:</strong></label><br>
+              <input type="text" id="area-name" value="Eiffel Tower, Paris" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+              <small style="color: #666;">e.g. Eiffel Tower, Paris | Paris Center | Manhattan, NY</small>
+            </p>
+
+            <p>
+              <label for="area-radius"><strong>Radius (meters):</strong></label><br>
+              <input type="number" id="area-radius" value="3000" min="500" max="10000" step="500" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+              <small style="color: #666;">Suggested: 1500m to 5000m</small>
+            </p>
+
+            <div style="margin: 15px 0; padding: 10px; background: #f8f9fa; border: 1px solid #ddd;">
+              <div><strong>Geocoded Center:</strong> <span id="preview-coords">None</span></div>
+              <div><strong>Full Name:</strong> <span id="preview-displayname">None</span></div>
+              <div style="margin-top: 5px; font-size: 12px; color: #555;"><i>All emergency facilities (Hospitals, Fire Stations, Police, Clinics) will be automatically detected and mapped.</i></div>
+            </div>
+
+            <p style="display: flex; gap: 10px; flex-wrap: wrap;">
+              <button id="btn-preview" style="padding: 8px 16px;">1. Preview Area on Map</button>
+              <button id="btn-generate" style="padding: 8px 16px; font-weight: bold;">2. Generate & Save GeoJSON</button>
+            </p>
+          </form>
+
+          <div id="area-pipeline-feedback" style="margin-top: 15px; font-size: 14px; white-space: pre-wrap;"></div>
+
+          <div id="area-stats-box" style="display: none; margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;">
+            <h4>Pipeline Generation Summary</h4>
+            <ul style="padding-left: 20px; margin: 5px 0;">
+              <li>Road Network Nodes: <b id="stat-nodes">0</b></li>
+              <li>Road Network Edges: <b id="stat-edges">0</b></li>
+              <li>Facilities Detected: <b id="stat-places">0</b></li>
+              <li>Snapped Facilities: <b id="stat-snapped">0</b></li>
+              <li>Permanent Roads File: <code id="stat-roads-file">data/out/roads.geojson</code></li>
+              <li>Permanent Places File: <code id="stat-places-file">data/out/places.geojson</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Right Column: Interactive Leaflet Map Viewer -->
+        <div style="flex: 1.5; min-width: 380px; border: 1px solid #ccc; padding: 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin: 0;">Interactive Zone Map (OpenStreetMap & Leaflet)</h3>
+            <span id="map-status-overlay" style="font-size: 12px; color: #555;">Map ready</span>
+          </div>
+
+          <!-- Leaflet Map Container with explicit height -->
+          <div id="leaflet-map" style="width: 100%; height: 480px; border: 1px solid #999; border-radius: 4px; z-index: 1;"></div>
+
+          <div style="margin-top: 10px; font-size: 13px; color: #444; display: flex; gap: 15px; flex-wrap: wrap;">
+            <span><span style="display: inline-block; width: 12px; height: 12px; background: #2A81CB; border-radius: 50%; vertical-align: middle;"></span> Center Position</span>
+            <span><span style="display: inline-block; width: 12px; height: 12px; border: 1px dashed #ff8800; background: rgba(255,165,0,0.3); vertical-align: middle;"></span> Coverage Radius</span>
+            <span><span style="display: inline-block; width: 16px; height: 3px; background: #0066cc; vertical-align: middle;"></span> Drivable Roads</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #e74c3c; border-radius: 50%; vertical-align: middle;"></span> Hospitals</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #e67e22; border-radius: 50%; vertical-align: middle;"></span> Fire Stations</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #2980b9; border-radius: 50%; vertical-align: middle;"></span> Police</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #27ae60; border-radius: 50%; vertical-align: middle;"></span> Clinics & Others</span>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 2B. Incident Report Handling Menu          -->
+    <!-- ========================================== -->
+    <section id="section-incidents" style="display: none;">
+      <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh; text-align: center;">
+        <h1 style="font-size: 56px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 2C. Past Dispatch Statistics               -->
+    <!-- ========================================== -->
+    <section id="section-stats" style="display: none;">
+      <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh; text-align: center;">
+        <h1 style="font-size: 56px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="data/out/places.js"></script>
+  <script src="data/out/roads.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
