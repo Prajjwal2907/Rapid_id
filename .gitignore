@@ -3,3 +3,6 @@ build/
 *.o
 *.exe
 data/
+config.json
+config.local.json
+api_key.txt
