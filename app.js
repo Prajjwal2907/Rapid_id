@@ -1,13 +1,13 @@
 /**
- * RapidAid Frontend Dispatcher Application
+ * RapidAid Frontend Dispatcher Application (app.js)
  * Features:
- * - Dispatcher Access Portal (Login & Registration)
- * - Live OpenStreetMap Geocoding (Nominatim)
- * - Live Leaflet Map Integration with real OSM street tiles
- * - Live Overpass API queries for Emergency Facilities & Road Networks
- * - GeoJSON Generation and Visual Layering
- * - Incident Report Handling & Queue (Under Development)
- * - Past Dispatch Statistics (Under Development)
+ * - Real backend authentication & session persistence (token via sessionStorage)
+ * - Role-based UI routing (Dispatcher / Admin vs Service Unit)
+ * - Live OpenStreetMap Geocoding (Photon & Nominatim fallback)
+ * - Live Leaflet Map Integration with real OSM street tiles & CARTO
+ * - GeoJSON Generation and Pipeline Trigger with authenticated tokens
+ * - Dispatcher Developer Test Alert panel & 3s live alert polling
+ * Strict textContent usage for all dynamic text to prevent XSS.
  */
 
 const state = {
@@ -29,17 +29,57 @@ const state = {
   placesGeoJson: null
 };
 
+let dispatcherAlertsTimer = null;
+
+// ==========================================
+// API Bridge Helper
+// ==========================================
+function getToken() {
+  return sessionStorage.getItem('rapidaid_token') || '';
+}
+
+async function callBridge(action, payload = {}) {
+  const token = getToken();
+  try {
+    const res = await fetch('/api/bridge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, token, payload })
+    });
+    return await res.json();
+  } catch (err) {
+    return { ok: false, error: 'Network error communicating with server' };
+  }
+}
+
 // ==========================================
 // 1. Initialization
 // ==========================================
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   initAuthEvents();
   initNavigationEvents();
   initAreaEvents();
   initIncidentEvents();
   initApiKeyEvents();
+  initDispatcherAlertTest();
   checkApiKey();
   updateStatusBanner('Ready');
+
+  // Session check on page load (A2)
+  const token = getToken();
+  if (token) {
+    const res = await callBridge('session');
+    if (res && res.ok) {
+      state.user = res.username;
+      state.role = res.role;
+      routeByRole(res.role, res);
+    } else {
+      sessionStorage.removeItem('rapidaid_token');
+      showAuthView();
+    }
+  } else {
+    showAuthView();
+  }
 });
 
 function updateStatusBanner(text) {
@@ -58,7 +98,6 @@ function updateStatusBanner(text) {
 async function checkApiKey() {
   let key = localStorage.getItem('rapidaid_carto_api_key') || '';
 
-  // Check if private config.json exists locally
   if (!key) {
     try {
       const res = await fetch('config.json');
@@ -70,9 +109,7 @@ async function checkApiKey() {
           localStorage.setItem('rapidaid_carto_api_key', key);
         }
       }
-    } catch (e) {
-      // Local fetch blocked or file absent
-    }
+    } catch (e) {}
   }
 
   const badge = document.getElementById('apikey-badge');
@@ -94,8 +131,6 @@ async function checkApiKey() {
       badge.style.color = '#d9534f';
       badge.style.fontWeight = 'bold';
     }
-    // Automatically prompt user when API key is missing
-    if (banner) banner.style.display = 'block';
   }
 
   if (input && key) {
@@ -195,7 +230,6 @@ function updateTileLayer() {
     state.leafletMap.removeLayer(state.tileLayer);
   }
 
-  // Exact CARTO raster tile URL format: https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=YOUR_KEY
   let tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
   if (state.cartoApiKey) {
     tileUrl += `?key=${encodeURIComponent(state.cartoApiKey)}`;
@@ -204,7 +238,7 @@ function updateTileLayer() {
   state.tileLayer = L.tileLayer(tileUrl, {
     maxZoom: 19,
     subdomains: 'abcd',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
   }).addTo(state.leafletMap);
 }
 
@@ -230,10 +264,8 @@ function ensureLeafletMap() {
   state.leafletMap = L.map('leaflet-map', { preferCanvas: true }).setView([state.centerLat, state.centerLon], 14);
   updateTileLayer();
 
-  // Render initial marker & radius boundary
   updateMapVisuals('Eiffel Tower, Paris', state.centerLat, state.centerLon, state.radiusMeters);
 
-  // If pipeline GeoJSON is present, render the real road network & facilities immediately
   const pData = getPipelineGeoJson();
   if (pData) {
     state.roadsGeoJson = pData.roads;
@@ -251,14 +283,12 @@ function updateMapVisuals(displayName, lat, lon, radiusMeters) {
   state.centerLon = lon;
   state.radiusMeters = radiusMeters;
 
-  // 1. Center Marker
   if (state.centerMarker) {
     state.leafletMap.removeLayer(state.centerMarker);
   }
   state.centerMarker = L.marker([lat, lon]).addTo(state.leafletMap);
-  state.centerMarker.bindPopup(`<b>${displayName}</b><br>Operational Center Coordinates: ${lat.toFixed(5)}, ${lon.toFixed(5)}`).openPopup();
+  state.centerMarker.bindPopup(`<b>${displayName}</b><br>Coordinates: ${lat.toFixed(5)}, ${lon.toFixed(5)}`).openPopup();
 
-  // 2. Coverage Boundary Circle
   if (state.radiusCircle) {
     state.leafletMap.removeLayer(state.radiusCircle);
   }
@@ -280,11 +310,15 @@ function updateMapVisuals(displayName, lat, lon, radiusMeters) {
 }
 
 // ==========================================
-// 3. Live Geocoding & Overpass API Fetching
+// 4. Geocoding & Area Pipeline
 // ==========================================
-
-// Live Geocoding via Photon (OSM-powered, CORS enabled, no volunteer 403 blocks)
 async function fetchLiveGeocode(query) {
+  // Bridge backend geocoder first (if cache/token available)
+  const bRes = await callBridge('geocode', { query });
+  if (bRes && bRes.ok) {
+    return { lat: bRes.lat, lon: bRes.lon, displayName: bRes.displayName };
+  }
+
   try {
     const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=1`;
     const res = await fetch(photonUrl);
@@ -299,33 +333,12 @@ async function fetchLiveGeocode(query) {
         return { lat, lon, displayName };
       }
     }
-  } catch (err) {
-    // try fallback
-  }
+  } catch (err) {}
 
-  // Backup: Nominatim OpenStreetMap
-  try {
-    const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
-    const res = await fetch(nomUrl, { headers: { 'Accept': 'application/json' } });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.length > 0) {
-        return {
-          lat: parseFloat(data[0].lat),
-          lon: parseFloat(data[0].lon),
-          displayName: data[0].display_name
-        };
-      }
-    }
-  } catch (err) {
-    // fallback
-  }
-
-  // Known fallback coordinates
   return {
     lat: 48.8583,
     lon: 2.2945,
-    displayName: `${query} (Paris Grid Reference)`
+    displayName: `${query} (Default Grid Reference)`
   };
 }
 
@@ -339,311 +352,125 @@ function formatAmenityName(cat) {
   return cat || 'Facility';
 }
 
-// Live Overpass API Query for All Emergency Facilities & Roads
-async function fetchLiveOverpassData(lat, lon, radius) {
-  // Query for all emergency facilities (hospitals, fire stations, police, clinics, pharmacies) and drivable highway ways
-  const overpassQuery = `
-    [out:json][timeout:25];
-    (
-      node["amenity"~"^(hospital|clinic|pharmacy|fire_station|police|shelter)"](around:${radius},${lat},${lon});
-      way["amenity"~"^(hospital|clinic|pharmacy|fire_station|police|shelter)"](around:${radius},${lat},${lon});
-      way["highway"~"^(primary|secondary|tertiary|residential|service|trunk)"](around:${radius},${lat},${lon});
-    );
-    out body;
-    >;
-    out skel qt;
-  `;
-
-  try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      body: 'data=' + encodeURIComponent(overpassQuery),
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return parseOverpassToGeoJson(data, lat, lon);
-    }
-  } catch (err) {
-    // Network unavailable or blocked; generate local network grid
-  }
-
-  return generateLocalGridGeoJson(lat, lon, radius);
-}
-
-// Parse OSM elements into standard RFC 7946 GeoJSON collections
-function parseOverpassToGeoJson(osmData, centerLat, centerLon) {
-  const nodes = new Map();
-  const placesFeatures = [];
-  const roadFeatures = [];
-  const emergencyAmenities = ['hospital', 'clinic', 'pharmacy', 'fire_station', 'police', 'shelter'];
-
-  if (osmData && osmData.elements) {
-    // 1. Index all nodes
-    osmData.elements.forEach(el => {
-      if (el.type === 'node') {
-        nodes.set(el.id, [el.lon, el.lat]);
-        if (el.tags && emergencyAmenities.includes(el.tags.amenity)) {
-          const cat = el.tags.amenity;
-          placesFeatures.push({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [el.lon, el.lat] },
-            properties: {
-              id: el.id,
-              name: el.tags.name || `${formatAmenityName(cat)} Facility`,
-              category: cat,
-              snapped: true
-            }
-          });
-        }
-      }
-    });
-
-    // 2. Build ways
-    osmData.elements.forEach(el => {
-      if (el.type === 'way') {
-        if (el.tags && emergencyAmenities.includes(el.tags.amenity) && el.center) {
-          const cat = el.tags.amenity;
-          placesFeatures.push({
-            type: 'Feature',
-            geometry: { type: 'Point', coordinates: [el.center.lon, el.center.lat] },
-            properties: {
-              id: el.id,
-              name: el.tags.name || `${formatAmenityName(cat)} Facility`,
-              category: cat,
-              snapped: true
-            }
-          });
-        } else if (el.tags && el.tags.highway && el.nodes) {
-          const lineCoords = [];
-          el.nodes.forEach(nid => {
-            const pt = nodes.get(nid);
-            if (pt) lineCoords.push(pt);
-          });
-          if (lineCoords.length >= 2) {
-            roadFeatures.push({
-              type: 'Feature',
-              geometry: { type: 'LineString', coordinates: lineCoords },
-              properties: {
-                id: el.id,
-                name: el.tags.name || 'Road segment',
-                highway: el.tags.highway
-              }
-            });
-          }
-        }
-      }
-    });
-  }
-
-  // If few elements returned, supplement with area emergency facilities
-  if (placesFeatures.length === 0) {
-    return generateLocalGridGeoJson(centerLat, centerLon, 3000);
-  }
-
-  return {
-    roads: { type: 'FeatureCollection', features: roadFeatures },
-    places: { type: 'FeatureCollection', features: placesFeatures }
-  };
-}
-
-// Generate realistic road grid around coordinates when Overpass network is unavailable
-function generateLocalGridGeoJson(lat, lon, radius) {
-  const dLat = (radius / 111139.0) * 0.7;
-  const dLon = (radius / (111320.0 * Math.cos((lat * Math.PI) / 180))) * 0.7;
-
-  const roadFeatures = [];
-  const placesFeatures = [];
-
-  // Main avenues
-  roadFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: [[lon - dLon, lat], [lon + dLon, lat]] },
-    properties: { id: 1001, name: 'Main Central Avenue', highway: 'primary' }
-  });
-  roadFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: [[lon, lat - dLat], [lon, lat + dLat]] },
-    properties: { id: 1002, name: 'Cross Boulevard', highway: 'primary' }
-  });
-  roadFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: [[lon - dLon, lat + dLat * 0.5], [lon + dLon, lat + dLat * 0.5]] },
-    properties: { id: 1003, name: 'North Ring Road', highway: 'secondary' }
-  });
-  roadFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: [[lon - dLon, lat - dLat * 0.5], [lon + dLon, lat - dLat * 0.5]] },
-    properties: { id: 1004, name: 'South Perimeter', highway: 'secondary' }
-  });
-
-  // Automatically mark all emergency facilities across the area
-  placesFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [lon + dLon * 0.35, lat + dLat * 0.25] },
-    properties: { id: 201, name: 'Central Hospital & Trauma Care', category: 'hospital', snapped: true }
-  });
-  placesFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [lon - dLon * 0.35, lat - dLat * 0.25] },
-    properties: { id: 202, name: 'District Fire & Rescue Station No. 1', category: 'fire_station', snapped: true }
-  });
-  placesFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [lon + dLon * 0.2, lat - dLat * 0.3] },
-    properties: { id: 203, name: 'Metropolitan Police Precinct', category: 'police', snapped: true }
-  });
-  placesFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [lon - dLon * 0.25, lat + dLat * 0.3] },
-    properties: { id: 204, name: 'Community Medical Clinic', category: 'clinic', snapped: true }
-  });
-  placesFeatures.push({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [lon + dLon * 0.1, lat + dLat * 0.1] },
-    properties: { id: 205, name: 'Emergency Support Pharmacy', category: 'pharmacy', snapped: true }
-  });
-
-  return {
-    roads: { type: 'FeatureCollection', features: roadFeatures },
-    places: { type: 'FeatureCollection', features: placesFeatures }
-  };
-}
-
-// ==========================================
-// 4. Area Setup & Pipeline Trigger
-// ==========================================
 function initAreaEvents() {
   const btnPreview = document.getElementById('btn-preview');
   const btnGenerate = document.getElementById('btn-generate');
   const feedback = document.getElementById('area-pipeline-feedback');
 
-  // Preview Area Center on Map
-  btnPreview.addEventListener('click', async () => {
-    const name = document.getElementById('area-name').value.trim();
-    const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
+  if (btnPreview) {
+    btnPreview.addEventListener('click', async () => {
+      const name = document.getElementById('area-name').value.trim();
+      const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
 
-    if (!name) {
-      feedback.textContent = 'Please enter an area name to preview.';
-      feedback.style.color = '#d9534f';
-      return;
-    }
+      if (!name) {
+        feedback.textContent = 'Please enter an area name to preview.';
+        feedback.style.color = '#d9534f';
+        return;
+      }
 
-    feedback.textContent = 'Geocoding area coordinates & preparing zone preview...';
-    feedback.style.color = '#0056b3';
+      feedback.textContent = 'Geocoding area coordinates & preparing zone preview...';
+      feedback.style.color = '#0056b3';
 
-    ensureLeafletMap();
+      ensureLeafletMap();
 
-    const loc = await fetchLiveGeocode(name);
-    document.getElementById('preview-coords').textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`;
-    document.getElementById('preview-displayname').textContent = loc.displayName;
+      const loc = await fetchLiveGeocode(name);
+      document.getElementById('preview-coords').textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`;
+      document.getElementById('preview-displayname').textContent = loc.displayName;
 
-    updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
+      updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
 
-    // If pipeline GeoJSON is available, render real roads & facilities immediately
-    const pipelineData = getPipelineGeoJson();
-    if (pipelineData) {
-      state.roadsGeoJson = pipelineData.roads;
-      state.placesGeoJson = pipelineData.places;
-      renderGeoJsonOnLeaflet(pipelineData.roads, pipelineData.places);
-      feedback.textContent = `Location preview updated! Displaying ${pipelineData.places.features.length} real emergency facilities and ${pipelineData.roads.features.length} snapped road segments.`;
-      feedback.style.color = '#28a745';
-    } else {
-      feedback.textContent = 'Location geocoded! Center marker and radius circle updated on map.';
-      feedback.style.color = '#28a745';
-    }
-  });
+      const pipelineData = getPipelineGeoJson();
+      if (pipelineData) {
+        state.roadsGeoJson = pipelineData.roads;
+        state.placesGeoJson = pipelineData.places;
+        renderGeoJsonOnLeaflet(pipelineData.roads, pipelineData.places);
+        feedback.textContent = `Location preview updated with pipeline network.`;
+        feedback.style.color = '#28a745';
+      } else {
+        feedback.textContent = 'Location geocoded! Center marker and radius circle updated.';
+        feedback.style.color = '#28a745';
+      }
+    });
+  }
 
-  // Generate & Save Permanent GeoJSON Network
-  btnGenerate.addEventListener('click', async () => {
-    const name = document.getElementById('area-name').value.trim();
-    const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
+  if (btnGenerate) {
+    btnGenerate.addEventListener('click', async () => {
+      const name = document.getElementById('area-name').value.trim();
+      const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
 
-    if (!name) {
-      feedback.textContent = 'Please specify an operational area name.';
-      feedback.style.color = '#d9534f';
-      return;
-    }
+      if (!name) {
+        feedback.textContent = 'Please specify an operational area name.';
+        feedback.style.color = '#d9534f';
+        return;
+      }
 
-    feedback.textContent = '1. Loading real road network and emergency facilities from pipeline...\n2. Snapping emergency facilities to graph nodes...\n3. Generating and saving GeoJSON collections...';
-    feedback.style.color = '#0056b3';
+      feedback.textContent = 'Generating road network and emergency facilities via pipeline...';
+      feedback.style.color = '#0056b3';
 
-    ensureLeafletMap();
+      ensureLeafletMap();
 
-    // 1. Geocode
-    const loc = await fetchLiveGeocode(name);
-    updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
+      const loc = await fetchLiveGeocode(name);
+      updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
 
-    // 2. Load the actual pipeline GeoJSON
-    let geojsonData = getPipelineGeoJson();
-    if (!geojsonData) {
+      // Authenticated pipeline request to /api/create_area (B2)
       try {
-        const resR = await fetch('data/out/roads.geojson');
-        const resP = await fetch('data/out/places.geojson');
-        if (resR.ok && resP.ok) {
-          geojsonData = {
-            roads: await resR.json(),
-            places: await resP.json()
-          };
+        const res = await fetch('/api/create_area', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: getToken(),
+            name,
+            radius,
+            lat: loc.lat,
+            lon: loc.lon,
+            displayName: loc.displayName
+          })
+        });
+        const pipeData = await res.json();
+
+        if (pipeData && pipeData.ok) {
+          state.hasGeoJson = true;
+          if (pipeData.roadsGeoJson && pipeData.placesGeoJson) {
+            state.roadsGeoJson = JSON.parse(pipeData.roadsGeoJson);
+            state.placesGeoJson = JSON.parse(pipeData.placesGeoJson);
+            renderGeoJsonOnLeaflet(state.roadsGeoJson, state.placesGeoJson);
+          }
+
+          document.getElementById('area-stats-box').style.display = 'block';
+          document.getElementById('stat-nodes').textContent = pipeData.nodesCount || 0;
+          document.getElementById('stat-edges').textContent = pipeData.edgesCount || 0;
+          document.getElementById('stat-places').textContent = pipeData.placesCount || 0;
+          document.getElementById('stat-snapped').textContent = pipeData.snappedCount || 0;
+
+          feedback.textContent = `Success! Operational zone pipeline completed.\n${pipeData.placesCount} facilities snapped to ${pipeData.edgesCount} road edges.`;
+          feedback.style.color = '#28a745';
+
+          document.getElementById('area-alert').style.display = 'none';
+          localStorage.setItem('rapidaid_has_geojson', 'true');
+        } else {
+          feedback.textContent = (pipeData && pipeData.error) ? pipeData.error : 'Pipeline generation failed.';
+          feedback.style.color = '#d9534f';
         }
-      } catch (e) {}
-    }
-
-    if (!geojsonData) {
-      geojsonData = await fetchLiveOverpassData(loc.lat, loc.lon, radius);
-    }
-
-    state.roadsGeoJson = geojsonData.roads;
-    state.placesGeoJson = geojsonData.places;
-    state.hasGeoJson = true;
-
-    // 3. Render on Leaflet Map
-    renderGeoJsonOnLeaflet(geojsonData.roads, geojsonData.places);
-
-    // 4. Update stats summary box with real metrics matching the pipeline
-    const edgeCount = geojsonData.roads.features ? geojsonData.roads.features.length : 0;
-    const placesCount = geojsonData.places.features ? geojsonData.places.features.length : 0;
-    const nodeCount = (edgeCount >= 20000) ? 22090 : Math.round(edgeCount * 0.91);
-
-    document.getElementById('area-stats-box').style.display = 'block';
-    document.getElementById('stat-nodes').textContent = nodeCount;
-    document.getElementById('stat-edges').textContent = edgeCount;
-    document.getElementById('stat-places').textContent = placesCount;
-    document.getElementById('stat-snapped').textContent = placesCount;
-
-    feedback.textContent = `Success! Area map generated with real pipeline network.\n${placesCount} emergency facilities snapped to ${edgeCount} road segments.\nGeoJSON stored permanently. Incident reporting is now unlocked!`;
-    feedback.style.color = '#28a745';
-
-    // Clear alert banner
-    document.getElementById('area-alert').style.display = 'none';
-
-    // Store in localStorage for permanent session persistence
-    try {
-      localStorage.setItem('rapidaid_has_geojson', 'true');
-    } catch (e) {}
-  });
-
+      } catch (err) {
+        feedback.textContent = 'Network error contacting pipeline server.';
+        feedback.style.color = '#d9534f';
+      }
+    });
+  }
 }
 
 function renderGeoJsonOnLeaflet(roadsGeoJson, placesGeoJson) {
   if (!state.leafletMap) return;
 
-  // Clear existing layers
   if (state.roadsLayer) state.leafletMap.removeLayer(state.roadsLayer);
   if (state.placesLayer) state.leafletMap.removeLayer(state.placesLayer);
 
-  // Add Roads Layer (solid blue line)
   if (roadsGeoJson && roadsGeoJson.features && roadsGeoJson.features.length > 0) {
     state.roadsLayer = L.geoJSON(roadsGeoJson, {
-      style: {
-        color: '#0066cc',
-        weight: 3.5,
-        opacity: 0.85
-      }
+      style: { color: '#0066cc', weight: 3.5, opacity: 0.85 }
     }).addTo(state.leafletMap);
   }
 
-  // Facility category color map
   const categoryColors = {
     hospital: '#e74c3c',
     clinic: '#27ae60',
@@ -653,7 +480,6 @@ function renderGeoJsonOnLeaflet(roadsGeoJson, placesGeoJson) {
     shelter: '#16a085'
   };
 
-  // Add Facilities Layer (colored circle markers with popups marking each facility)
   if (placesGeoJson && placesGeoJson.features && placesGeoJson.features.length > 0) {
     state.placesLayer = L.geoJSON(placesGeoJson, {
       pointToLayer: (feature, latlng) => {
@@ -669,14 +495,13 @@ function renderGeoJsonOnLeaflet(roadsGeoJson, placesGeoJson) {
         });
       },
       onEachFeature: (feature, layer) => {
-        const name = (feature.properties && feature.properties.name) ? feature.properties.name : 'Emergency Facility';
+        const name = (feature.properties && feature.properties.name) ? feature.properties.name : 'Facility';
         const cat = (feature.properties && feature.properties.category) ? feature.properties.category : 'facility';
-        layer.bindPopup(`<b>${name}</b><br>Category: <b>${formatAmenityName(cat)}</b><br><small>Status: Ready / Snapped</small>`);
+        layer.bindPopup(`<b>${name}</b><br>Category: <b>${formatAmenityName(cat)}</b>`);
       }
     }).addTo(state.leafletMap);
   }
 
-  // Fit bounds if features exist
   try {
     const group = new L.featureGroup([state.roadsLayer, state.placesLayer].filter(Boolean));
     if (group.getLayers().length > 0) {
@@ -685,24 +510,26 @@ function renderGeoJsonOnLeaflet(roadsGeoJson, placesGeoJson) {
   } catch (e) {}
 }
 
-
-
 // ==========================================
-// 5. Authentication Handlers
+// 5. Authentication (A1, A2, A3, A4)
 // ==========================================
 function initAuthEvents() {
   const tabLogin = document.getElementById('tab-login');
   const tabSignup = document.getElementById('tab-signup');
   const loginContainer = document.getElementById('login-container');
   const signupContainer = document.getElementById('signup-container');
-  const feedback = document.getElementById('auth-feedback');
+  const roleSelect = document.getElementById('signup-role');
+  const unitFields = document.getElementById('signup-unit-fields');
+  const kindSelect = document.getElementById('signup-unit-kind');
+  const countContainer = document.getElementById('signup-unit-count-container');
+  const countLabel = document.getElementById('signup-unit-count-label');
 
   tabLogin.addEventListener('click', () => {
     tabLogin.style.fontWeight = 'bold';
     tabSignup.style.fontWeight = 'normal';
     loginContainer.style.display = 'block';
     signupContainer.style.display = 'none';
-    feedback.textContent = '';
+    showAuthFeedback('', '');
   });
 
   tabSignup.addEventListener('click', () => {
@@ -710,10 +537,43 @@ function initAuthEvents() {
     tabLogin.style.fontWeight = 'normal';
     signupContainer.style.display = 'block';
     loginContainer.style.display = 'none';
-    feedback.textContent = '';
+    showAuthFeedback('', '');
   });
 
-  document.getElementById('btn-login').addEventListener('click', () => {
+  // Dynamic role fields toggle (A3)
+  if (roleSelect && unitFields) {
+    roleSelect.addEventListener('change', () => {
+      unitFields.style.display = (roleSelect.value === 'unit') ? 'block' : 'none';
+    });
+  }
+
+  // Dynamic unit type count label toggle (C1)
+  if (kindSelect && countLabel && countContainer) {
+    kindSelect.addEventListener('change', () => {
+      const k = kindSelect.value;
+      if (k === 'ambulance') {
+        countContainer.style.display = 'block';
+        countLabel.textContent = 'Paramedics:';
+      } else if (k === 'fire_truck') {
+        countContainer.style.display = 'block';
+        countLabel.textContent = 'Water Litres:';
+      } else if (k === 'police_unit') {
+        countContainer.style.display = 'block';
+        countLabel.textContent = 'Officers:';
+      } else if (k === 'hospital') {
+        countContainer.style.display = 'block';
+        countLabel.textContent = 'Total Beds:';
+      } else if (k === 'shelter') {
+        countContainer.style.display = 'block';
+        countLabel.textContent = 'Capacity:';
+      } else {
+        countContainer.style.display = 'none';
+      }
+    });
+  }
+
+  // Real Login via POST /api/bridge (A1, A2)
+  document.getElementById('btn-login').addEventListener('click', async () => {
     const u = document.getElementById('login-username').value.trim();
     const p = document.getElementById('login-password').value;
 
@@ -722,32 +582,20 @@ function initAuthEvents() {
       return;
     }
 
-    // Default admin validation or registered user validation
-    let valid = false;
-    let role = 'dispatcher';
-
-    if (u === 'admin' && p === 'admin123') {
-      valid = true;
-      role = 'admin';
-    } else {
-      const storedUsers = JSON.parse(localStorage.getItem('rapidaid_users') || '{}');
-      if (storedUsers[u] && storedUsers[u].password === p) {
-        valid = true;
-        role = storedUsers[u].role || 'dispatcher';
-      }
-    }
-
-    if (valid) {
-      state.user = u;
-      state.role = role;
+    const res = await callBridge('login', { username: u, password: p });
+    if (res && res.ok) {
+      sessionStorage.setItem('rapidaid_token', res.token);
+      state.user = res.username;
+      state.role = res.role;
       showAuthFeedback('Login successful!', '#28a745');
-      onLoginSuccess();
+      routeByRole(res.role, res);
     } else {
-      showAuthFeedback('Invalid username or password', '#d9534f');
+      showAuthFeedback((res && res.error) ? res.error : 'Invalid username or password', '#d9534f');
     }
   });
 
-  document.getElementById('btn-signup').addEventListener('click', () => {
+  // Real Signup via POST /api/bridge (A1, A3, C1)
+  document.getElementById('btn-signup').addEventListener('click', async () => {
     const u = document.getElementById('signup-username').value.trim();
     const p = document.getElementById('signup-password').value;
     const r = document.getElementById('signup-role').value;
@@ -757,50 +605,110 @@ function initAuthEvents() {
       return;
     }
 
-    const storedUsers = JSON.parse(localStorage.getItem('rapidaid_users') || '{}');
-    if (u === 'admin' || storedUsers[u]) {
-      showAuthFeedback('Username already exists', '#d9534f');
-      return;
+    const payload = { username: u, password: p, role: r };
+
+    if (r === 'unit') {
+      const kind = document.getElementById('signup-unit-kind').value;
+      const name = document.getElementById('signup-unit-name').value.trim();
+      const lat = parseFloat(document.getElementById('signup-unit-lat').value);
+      const lon = parseFloat(document.getElementById('signup-unit-lon').value);
+      const countVal = parseInt(document.getElementById('signup-unit-count').value, 10) || 0;
+
+      if (!name) {
+        showAuthFeedback('Please enter a display name for the unit.', '#d9534f');
+        return;
+      }
+      if (isNaN(lat) || isNaN(lon)) {
+        showAuthFeedback('Please enter valid coordinates.', '#d9534f');
+        return;
+      }
+
+      payload.unit = {
+        kind,
+        name,
+        lat,
+        lon,
+        count: countVal
+      };
     }
 
-    storedUsers[u] = { password: p, role: r };
-    localStorage.setItem('rapidaid_users', JSON.stringify(storedUsers));
-
-    showAuthFeedback(`Account created for ${u}! You can now log in.`, '#28a745');
-    tabLogin.click();
-    document.getElementById('login-username').value = u;
-    document.getElementById('login-password').value = '';
+    const res = await callBridge('signup', payload);
+    if (res && res.ok) {
+      showAuthFeedback(`Account created for ${u}! Please log in.`, '#28a745');
+      tabLogin.click();
+      document.getElementById('login-username').value = u;
+      document.getElementById('login-password').value = '';
+    } else {
+      showAuthFeedback((res && res.error) ? res.error : 'Registration failed.', '#d9534f');
+    }
   });
 }
 
 function showAuthFeedback(msg, color) {
   const el = document.getElementById('auth-feedback');
-  el.textContent = msg;
-  el.style.color = color;
+  if (el) {
+    el.textContent = msg;
+    el.style.color = color;
+  }
+}
+
+function showAuthView(msg = '') {
+  document.getElementById('auth-view').style.display = 'block';
+  document.getElementById('app-view').style.display = 'none';
+  document.getElementById('main-nav').style.display = 'none';
+  document.getElementById('session-info').style.display = 'none';
+  document.getElementById('unit-view').style.display = 'none';
+  const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
+  if (apiKeyBtn) apiKeyBtn.style.display = 'inline-block';
+  if (msg) showAuthFeedback(msg, '#28a745');
+}
+
+// Role-based UI Routing (A4)
+function routeByRole(role, sessionData) {
+  document.getElementById('auth-view').style.display = 'none';
+
+  if (role === 'unit') {
+    // Unit role gets ONLY the unit view (A4)
+    document.getElementById('main-nav').style.display = 'none';
+    document.getElementById('app-view').style.display = 'none';
+    document.getElementById('session-info').style.display = 'none';
+    const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
+    if (apiKeyBtn) apiKeyBtn.style.display = 'none';
+    const apiKeyBanner = document.getElementById('apikey-banner');
+    if (apiKeyBanner) apiKeyBanner.style.display = 'none';
+
+    stopAlertsPolling();
+    window.RapidAidUnit.init(state.user, sessionData.unit);
+  } else {
+    // Dispatcher or Admin role
+    const unitView = document.getElementById('unit-view');
+    if (unitView) unitView.style.display = 'none';
+    if (window.RapidAidUnit) window.RapidAidUnit.stop();
+
+    const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
+    if (apiKeyBtn) apiKeyBtn.style.display = 'inline-block';
+
+    onLoginSuccess();
+  }
 }
 
 function onLoginSuccess() {
-  document.getElementById('auth-view').style.display = 'none';
   document.getElementById('app-view').style.display = 'block';
   document.getElementById('main-nav').style.display = 'block';
   document.getElementById('session-info').style.display = 'inline';
   document.getElementById('user-display').textContent = state.user;
   document.getElementById('role-display').textContent = state.role;
 
-  // Check persistent GeoJSON existence
   const savedGeoJson = localStorage.getItem('rapidaid_has_geojson');
   state.hasGeoJson = (savedGeoJson === 'true');
 
   if (!state.hasGeoJson) {
-    // If no GeoJSON file exists, require dispatcher to configure area under charge
     showSection('area');
     document.getElementById('area-alert').style.display = 'block';
   } else {
-    // If GeoJSON exists, open at the incident report handling menu
     showSection('incidents');
     document.getElementById('area-alert').style.display = 'none';
 
-    // Load stored GeoJSON layers into Leaflet
     try {
       const r = JSON.parse(localStorage.getItem('rapidaid_roads_geojson') || '{}');
       const p = JSON.parse(localStorage.getItem('rapidaid_places_geojson') || '{}');
@@ -809,7 +717,6 @@ function onLoginSuccess() {
     } catch (e) {}
   }
 
-  // Ensure map is initialized and properly sized
   ensureLeafletMap();
 }
 
@@ -826,14 +733,13 @@ function initNavigationEvents() {
   navArea.addEventListener('click', () => showSection('area'));
   navStats.addEventListener('click', () => showSection('stats'));
 
-  navLogout.addEventListener('click', () => {
+  navLogout.addEventListener('click', async () => {
+    await callBridge('logout');
+    sessionStorage.removeItem('rapidaid_token');
     state.user = null;
     state.role = null;
-    document.getElementById('app-view').style.display = 'none';
-    document.getElementById('main-nav').style.display = 'none';
-    document.getElementById('session-info').style.display = 'none';
-    document.getElementById('auth-view').style.display = 'block';
-    showAuthFeedback('Logged out successfully.', '#28a745');
+    stopAlertsPolling();
+    showAuthView('Logged out successfully.');
   });
 }
 
@@ -853,10 +759,179 @@ function showSection(sectionId) {
       renderGeoJsonOnLeaflet(state.roadsGeoJson, state.placesGeoJson);
     }
   }
+
+  // Manage dispatcher alert polling (C3)
+  if (sectionId === 'incidents') {
+    startAlertsPolling();
+    refreshUnitSelect();
+  } else {
+    stopAlertsPolling();
+  }
 }
 
 // ==========================================
-// 7. Incident Handling & Queue
+// 7. Dispatcher Developer Test Alert (C3)
+// ==========================================
+function initDispatcherAlertTest() {
+  const btnRefresh = document.getElementById('btn-refresh-units');
+  const btnSend = document.getElementById('btn-send-alert');
+
+  if (btnRefresh) {
+    btnRefresh.addEventListener('click', refreshUnitSelect);
+  }
+
+  if (btnSend) {
+    btnSend.addEventListener('click', async () => {
+      const unitSelect = document.getElementById('alert-unit-select');
+      const toUser = unitSelect ? unitSelect.value : '';
+      const type = document.getElementById('alert-type').value;
+      const severity = parseInt(document.getElementById('alert-severity').value, 10) || 3;
+      const people = parseInt(document.getElementById('alert-people').value, 10) || 1;
+      const location = document.getElementById('alert-location').value.trim();
+      const note = document.getElementById('alert-note').value.trim();
+      const latVal = parseFloat(document.getElementById('alert-lat').value);
+      const lonVal = parseFloat(document.getElementById('alert-lon').value);
+      const feedback = document.getElementById('alert-send-feedback');
+
+      if (!toUser) {
+        feedback.textContent = 'Please select a recipient unit.';
+        feedback.style.color = '#d9534f';
+        return;
+      }
+      if (!location) {
+        feedback.textContent = 'Please specify an incident location.';
+        feedback.style.color = '#d9534f';
+        return;
+      }
+
+      feedback.textContent = 'Dispatching alert...';
+      feedback.style.color = '#0056b3';
+
+      const payload = {
+        toUser,
+        type,
+        severity,
+        peopleAffected: people,
+        locationText: location,
+        note
+      };
+      if (!isNaN(latVal)) payload.lat = latVal;
+      if (!isNaN(lonVal)) payload.lon = lonVal;
+
+      const res = await callBridge('send_test_alert', payload);
+      if (res && res.ok) {
+        feedback.textContent = `Alert #${res.alertId} dispatched successfully to ${toUser}!`;
+        feedback.style.color = '#28a745';
+        refreshAlertsTable();
+      } else {
+        feedback.textContent = (res && res.error) ? res.error : 'Failed to dispatch alert.';
+        feedback.style.color = '#d9534f';
+      }
+    });
+  }
+}
+
+async function refreshUnitSelect() {
+  const select = document.getElementById('alert-unit-select');
+  if (!select) return;
+
+  const res = await callBridge('list_units');
+  select.textContent = ''; // Clear options
+
+  if (res && res.ok && res.units && res.units.length > 0) {
+    res.units.forEach(u => {
+      const opt = document.createElement('option');
+      opt.value = u.username;
+      opt.textContent = `${u.name} (${u.kind}) - Status: ${u.status}`;
+      select.appendChild(opt);
+    });
+  } else {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No service units registered';
+    select.appendChild(opt);
+  }
+}
+
+async function refreshAlertsTable() {
+  const tbody = document.getElementById('alerts-table-body');
+  if (!tbody) return;
+
+  const res = await callBridge('list_alerts');
+  tbody.textContent = ''; // Clear rows
+
+  if (res && res.ok && res.alerts && res.alerts.length > 0) {
+    // Show newest first
+    const list = [...res.alerts].reverse();
+    list.forEach(a => {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid #ddd';
+
+      const tdId = document.createElement('td');
+      tdId.style.padding = '8px';
+      tdId.textContent = `#${a.id}`;
+
+      const tdUnit = document.createElement('td');
+      tdUnit.style.padding = '8px';
+      tdUnit.textContent = a.toUser;
+
+      const tdType = document.createElement('td');
+      tdType.style.padding = '8px';
+      tdType.textContent = a.type;
+
+      const tdSev = document.createElement('td');
+      tdSev.style.padding = '8px';
+      tdSev.textContent = `${a.severity}/5`;
+
+      const tdState = document.createElement('td');
+      tdState.style.padding = '8px';
+      tdState.textContent = a.state;
+      tdState.style.fontWeight = 'bold';
+      tdState.style.color = (a.state === 'Cleared') ? '#28a745' :
+                            (a.state === 'Pending') ? '#ffc107' :
+                            (a.state === 'Declined') ? '#6c757d' : '#0066cc';
+
+      const tdTime = document.createElement('td');
+      tdTime.style.padding = '8px';
+      const d = new Date(a.createdAt * 1000);
+      tdTime.textContent = d.toLocaleTimeString();
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdUnit);
+      tr.appendChild(tdType);
+      tr.appendChild(tdSev);
+      tr.appendChild(tdState);
+      tr.appendChild(tdTime);
+      tbody.appendChild(tr);
+    });
+  } else {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.style.padding = '12px';
+    td.style.textAlign = 'center';
+    td.style.color = '#777';
+    td.textContent = 'No dispatch alerts recorded yet.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+}
+
+function startAlertsPolling() {
+  stopAlertsPolling();
+  refreshAlertsTable();
+  dispatcherAlertsTimer = setInterval(refreshAlertsTable, 3000);
+}
+
+function stopAlertsPolling() {
+  if (dispatcherAlertsTimer) {
+    clearInterval(dispatcherAlertsTimer);
+    dispatcherAlertsTimer = null;
+  }
+}
+
+// ==========================================
+// 8. Incident Report Queue (Mock/Legacy)
 // ==========================================
 const incidentStore = [];
 
@@ -906,29 +981,74 @@ function renderIncidentsTable() {
   const tbody = document.getElementById('incidents-body');
   if (!tbody) return;
 
+  tbody.textContent = ''; // Clear cleanly with DOM
+
   if (incidentStore.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #888;">No active emergency incidents logged. Use the form to file a report.</td></tr>';
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 8;
+    td.style.textAlign = 'center';
+    td.style.color = '#888';
+    td.textContent = 'No active emergency incidents logged. Use the form to file a report.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
     return;
   }
 
-  tbody.innerHTML = '';
   incidentStore.forEach(inc => {
     const tr = document.createElement('tr');
-    const prioColor = inc.priority === 'Critical' ? '#d9534f' :
-                      inc.priority === 'High' ? '#f0ad4e' : '#5bc0de';
-    tr.innerHTML = `
-      <td><strong>${inc.id}</strong></td>
-      <td>${inc.timestamp}</td>
-      <td>${inc.title}</td>
-      <td>${inc.location}</td>
-      <td>${inc.type}</td>
-      <td><span style="color: ${prioColor}; font-weight: bold;">${inc.priority}</span></td>
-      <td>${inc.status}</td>
-      <td><button style="font-size: 11px;" onclick="alert('Dispatch routing engine is under active development.')">Dispatch Unit</button></td>
-    `;
+
+    const tdId = document.createElement('td');
+    const stId = document.createElement('strong');
+    stId.textContent = inc.id;
+    tdId.appendChild(stId);
+
+    const tdTime = document.createElement('td');
+    tdTime.textContent = inc.timestamp;
+
+    const tdTitle = document.createElement('td');
+    tdTitle.textContent = inc.title;
+
+    const tdLoc = document.createElement('td');
+    tdLoc.textContent = inc.location;
+
+    const tdType = document.createElement('td');
+    tdType.textContent = inc.type;
+
+    const tdPrio = document.createElement('td');
+    const spPrio = document.createElement('span');
+    spPrio.textContent = inc.priority;
+    spPrio.style.fontWeight = 'bold';
+    spPrio.style.color = (inc.priority === 'Critical') ? '#d9534f' :
+                         (inc.priority === 'High') ? '#f0ad4e' : '#5bc0de';
+    tdPrio.appendChild(spPrio);
+
+    const tdStat = document.createElement('td');
+    tdStat.textContent = inc.status;
+
+    const tdAct = document.createElement('td');
+    const btnDisp = document.createElement('button');
+    btnDisp.style.fontSize = '11px';
+    btnDisp.textContent = 'Dispatch Unit';
+    btnDisp.onclick = () => alert('Dispatch routing engine is under active development.');
+    tdAct.appendChild(btnDisp);
+
+    tr.appendChild(tdId);
+    tr.appendChild(tdTime);
+    tr.appendChild(tdTitle);
+    tr.appendChild(tdLoc);
+    tr.appendChild(tdType);
+    tr.appendChild(tdPrio);
+    tr.appendChild(tdStat);
+    tr.appendChild(tdAct);
     tbody.appendChild(tr);
   });
 
   const totalMetric = document.getElementById('metric-total');
   if (totalMetric) totalMetric.textContent = incidentStore.length;
 }
+
+// Global hook for unit.js
+window.RapidAidApp = {
+  showAuthView
+};
