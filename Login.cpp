@@ -1,3 +1,6 @@
+#include "Login.hpp"
+#include "json.hpp"
+
 #include <iostream>
 #include <fstream>
 #include <unordered_map>
@@ -5,73 +8,58 @@
 #include <ctime>
 using namespace std;
 
-class Logger {
-    string filename;
-public:
-    Logger(string f = "log.txt") : filename(f) {}
+Logger::Logger(string f) : filename(f) {}
 
-    void log(string type, string details) {
-        ofstream out(filename, ios::app);
-        time_t t = time(nullptr);
-        string ts = ctime(&t);
-        ts.pop_back();
-        out << ts << " | " << type << " | " << details << "\n";
+void Logger::log(string type, string details) {
+    ofstream out(filename, ios::app);
+    time_t t = time(nullptr);
+    string ts = ctime(&t);
+    ts.pop_back();
+    out << ts << " | " << type << " | " << details << "\n";
+}
+
+size_t Auth::hashPass(const string& p) {
+    return hash<string>{}(p);
+}
+
+Auth::Auth(string f) : filename(f) {
+    load();
+    if (users.empty()) {
+        signUp("admin", "admin123", "admin");
     }
-};
+}
 
-struct User {
-    size_t passHash;
-    string role;
-};
-
-class Auth {
-    unordered_map<string, User> users;
-    string filename;
-
-    size_t hashPass(const string& p) {
-        return hash<string>{}(p);
+void Auth::load() {
+    ifstream in(filename);
+    string name, role;
+    size_t h;
+    while (in >> name >> h >> role) {
+        users[name] = {h, role};
     }
+}
 
-public:
-    Auth(string f = "users.txt") : filename(f) {
-        load();
-        if (users.empty()) {
-            signUp("admin", "admin123", "admin");
-        }
+void Auth::save() {
+    ofstream out(filename);
+    for (auto& p : users) {
+        out << p.first << " " << p.second.passHash
+            << " " << p.second.role << "\n";
     }
+}
 
-    void load() {
-        ifstream in(filename);
-        string name, role;
-        size_t h;
-        while (in >> name >> h >> role) {
-            users[name] = {h, role};
-        }
-    }
+bool Auth::signUp(string u, string p, string role) {
+    if (users.count(u)) return false;
+    users[u] = {hashPass(p), role};
+    save();
+    return true;
+}
 
-    void save() {
-        ofstream out(filename);
-        for (auto& p : users) {
-            out << p.first << " " << p.second.passHash
-                << " " << p.second.role << "\n";
-        }
-    }
+bool Auth::login(string u, string p) {
+    auto it = users.find(u);
+    if (it == users.end()) return false;
+    return it->second.passHash == hashPass(p);
+}
 
-    bool signUp(string u, string p, string role) {
-        if (users.count(u)) return false;
-        users[u] = {hashPass(p), role};
-        save();
-        return true;
-    }
-
-    bool login(string u, string p) {
-        auto it = users.find(u);
-        if (it == users.end()) return false;
-        return it->second.passHash == hashPass(p);
-    }
-
-    string getRole(string u) { return users[u].role; }
-};
+string Auth::getRole(string u) { return users[u].role; }
 
 void dispatcherMenu(Auth& auth, Logger& logger, string user) {
     bool isAdmin = (auth.getRole(user) == "admin");
@@ -113,6 +101,7 @@ void dispatcherMenu(Auth& auth, Logger& logger, string user) {
     }
 }
 
+#ifdef LOGIN_STANDALONE
 int main() {
     Auth auth;
     Logger logger;
@@ -141,4 +130,154 @@ int main() {
     logger.log("LOGIN_LOCKED", "3 failed attempts");
     cout << "Too many failed attempts. Exiting.\n";
     return 0;
+}
+#endif
+
+std::string handleLoginRequest(Auth& auth, const std::string& requestJson) {
+    try {
+        nlohmann::json j;
+        try {
+            j = nlohmann::json::parse(requestJson);
+        } catch (const nlohmann::json::exception&) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        if (!j.is_object() || !j.contains("username") || !j.contains("password")) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        if (!j["username"].is_string() || !j["password"].is_string()) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        std::string username = j["username"].get<std::string>();
+        std::string password = j["password"].get<std::string>();
+
+        if (auth.login(username, password)) {
+            Logger logger;
+            logger.log("LOGIN_SUCCESS", username);
+            std::string role = auth.getRole(username);
+            nlohmann::ordered_json resp;
+            resp["ok"] = true;
+            resp["username"] = username;
+            resp["role"] = role;
+            return resp.dump();
+        } else {
+            Logger logger;
+            logger.log("LOGIN_FAILED", username);
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Invalid username or password";
+            return resp.dump();
+        }
+    } catch (const nlohmann::json::exception&) {
+        nlohmann::ordered_json resp;
+        resp["ok"] = false;
+        resp["error"] = "Bad request";
+        return resp.dump();
+    } catch (...) {
+        nlohmann::ordered_json resp;
+        resp["ok"] = false;
+        resp["error"] = "Bad request";
+        return resp.dump();
+    }
+}
+
+std::string handleLogoutRequest(Auth& auth, const std::string& username) {
+    (void)auth;
+    try {
+        Logger logger;
+        logger.log("LOGOUT", username);
+        nlohmann::ordered_json resp;
+        resp["ok"] = true;
+        return resp.dump();
+    } catch (...) {
+        nlohmann::ordered_json resp;
+        resp["ok"] = true;
+        return resp.dump();
+    }
+}
+
+std::string handleHealthRequest() {
+    try {
+        nlohmann::ordered_json resp;
+        resp["ok"] = true;
+        resp["service"] = "login";
+        return resp.dump();
+    } catch (...) {
+        return "{\"ok\":true,\"service\":\"login\"}";
+    }
+}
+
+std::string handleSignUpRequest(Auth& auth, const std::string& requestJson) {
+    try {
+        nlohmann::json j;
+        try {
+            j = nlohmann::json::parse(requestJson);
+        } catch (const nlohmann::json::exception&) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        if (!j.is_object() || !j.contains("username") || !j.contains("password")) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        if (!j["username"].is_string() || !j["password"].is_string()) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        std::string username = j["username"].get<std::string>();
+        std::string password = j["password"].get<std::string>();
+        if (username.empty() || password.empty()) {
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Bad request";
+            return resp.dump();
+        }
+
+        std::string role = "dispatcher";
+        if (j.contains("role") && j["role"].is_string()) {
+            role = j["role"].get<std::string>();
+        }
+
+        if (auth.signUp(username, password, role)) {
+            Logger logger;
+            logger.log("USER_SIGNUP", username + " (" + role + ")");
+            nlohmann::ordered_json resp;
+            resp["ok"] = true;
+            resp["username"] = username;
+            resp["role"] = role;
+            return resp.dump();
+        } else {
+            Logger logger;
+            logger.log("SIGNUP_FAILED", username + " already exists");
+            nlohmann::ordered_json resp;
+            resp["ok"] = false;
+            resp["error"] = "Username already exists";
+            return resp.dump();
+        }
+    } catch (...) {
+        nlohmann::ordered_json resp;
+        resp["ok"] = false;
+        resp["error"] = "Bad request";
+        return resp.dump();
+    }
 }

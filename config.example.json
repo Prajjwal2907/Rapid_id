@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy this file to config.json (git-ignored) and insert your CARTO key.",
+  "key": "YOUR_KEY"
+}
