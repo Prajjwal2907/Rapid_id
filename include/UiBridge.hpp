@@ -87,6 +87,21 @@ std::string handleGetStatsRequest();
  */
 std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, const std::string& messageJson, const std::string& outDir = "data/out");
 
+/**
+ * @brief Checks if a token is valid and possesses the required role privilege.
+ * @param token Session token string.
+ * @param requiredRole Required role name (e.g. "dispatcher", "admin", "unit").
+ * @return true if token is valid and user has appropriate role; false otherwise.
+ * Failure behavior: Returns false if token is unknown, empty, or role is insufficient. Never throws.
+ */
+bool isTokenAuthorized(const std::string& token, const std::string& requiredRole);
+
+/**
+ * @brief Resets all in-memory bridge state including sessions, alerts, and unit registry.
+ * Failure behavior: Never throws.
+ */
+void resetBridgeState();
+
 } // namespace rapidaid::ui
 
 #endif // RAPIDAID_UI_UIBRIDGE_HPP

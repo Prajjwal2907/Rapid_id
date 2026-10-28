@@ -56,7 +56,7 @@
 
     <!-- Login Form -->
     <div id="login-container">
-      <h3>Dispatcher Login</h3>
+      <h3>System Login</h3>
       <form id="form-login" onsubmit="return false;">
         <p>
           <label for="login-username">Username:</label><br>
@@ -91,9 +91,44 @@
           <label for="signup-role">Role:</label><br>
           <select id="signup-role" style="width: 100%; padding: 6px;">
             <option value="dispatcher" selected>Dispatcher</option>
-            <option value="admin">Administrator</option>
+            <option value="unit">Service Unit</option>
           </select>
         </p>
+
+        <!-- Service Unit Details -->
+        <div id="signup-unit-fields" style="display: none; border-top: 1px solid #ddd; margin-top: 12px; padding-top: 10px;">
+          <p>
+            <label for="signup-unit-kind">Unit Type:</label><br>
+            <select id="signup-unit-kind" style="width: 100%; padding: 6px;">
+              <option value="ambulance" selected>Ambulance</option>
+              <option value="fire_truck">Fire Truck</option>
+              <option value="police_unit">Police Unit</option>
+              <option value="hospital">Hospital</option>
+              <option value="fire_station">Fire Station</option>
+              <option value="police_station">Police Station</option>
+              <option value="shelter">Shelter</option>
+            </select>
+          </p>
+          <p>
+            <label for="signup-unit-name">Display Name:</label><br>
+            <input type="text" id="signup-unit-name" placeholder="e.g. City Ambulance 1" style="width: 100%; padding: 6px; box-sizing: border-box;">
+          </p>
+          <div style="display: flex; gap: 10px;">
+            <p style="flex: 1; margin: 0 0 10px 0;">
+              <label for="signup-unit-lat">Latitude:</label><br>
+              <input type="number" step="any" id="signup-unit-lat" value="48.8584" style="width: 100%; padding: 6px; box-sizing: border-box;">
+            </p>
+            <p style="flex: 1; margin: 0 0 10px 0;">
+              <label for="signup-unit-lon">Longitude:</label><br>
+              <input type="number" step="any" id="signup-unit-lon" value="2.2945" style="width: 100%; padding: 6px; box-sizing: border-box;">
+            </p>
+          </div>
+          <p id="signup-unit-count-container" style="margin-top: 0;">
+            <label for="signup-unit-count" id="signup-unit-count-label">Paramedics:</label><br>
+            <input type="number" id="signup-unit-count" value="2" min="0" style="width: 100%; padding: 6px; box-sizing: border-box;">
+          </p>
+        </div>
+
         <p>
           <button id="btn-signup" style="padding: 8px 20px; font-size: 15px;">Create Account</button>
         </p>
@@ -105,7 +140,7 @@
   </main>
 
   <!-- ========================================== -->
-  <!-- 2. Main App View Container                 -->
+  <!-- 2. Main App View Container (Dispatcher/Admin) -->
   <!-- ========================================== -->
   <div id="app-view" style="display: none;">
 
@@ -117,7 +152,7 @@
         <strong>Notice:</strong> <span id="area-alert-text">No permanent area GeoJSON detected. Please configure the operational area under your charge.</span>
       </div>
 
-      <h2>Operational Area & Zone Map Configuration</h2>
+      <h2>Operational Area &amp; Zone Map Configuration</h2>
       <p>Enter the area details to geocode, preview the boundary and facilities side by side, and generate the permanent GeoJSON network.</p>
 
       <!-- Side-by-Side Container -->
@@ -147,7 +182,7 @@
 
             <p style="display: flex; gap: 10px; flex-wrap: wrap;">
               <button id="btn-preview" style="padding: 8px 16px;">1. Preview Area on Map</button>
-              <button id="btn-generate" style="padding: 8px 16px; font-weight: bold;">2. Generate & Save GeoJSON</button>
+              <button id="btn-generate" style="padding: 8px 16px; font-weight: bold;">2. Generate &amp; Save GeoJSON</button>
             </p>
           </form>
 
@@ -169,7 +204,7 @@
         <!-- Right Column: Interactive Leaflet Map Viewer -->
         <div style="flex: 1.5; min-width: 380px; border: 1px solid #ccc; padding: 18px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <h3 style="margin: 0;">Interactive Zone Map (OpenStreetMap & Leaflet)</h3>
+            <h3 style="margin: 0;">Interactive Zone Map (OpenStreetMap &amp; Leaflet)</h3>
             <span id="map-status-overlay" style="font-size: 12px; color: #555;">Map ready</span>
           </div>
 
@@ -183,7 +218,7 @@
             <span><span style="display: inline-block; width: 10px; height: 10px; background: #e74c3c; border-radius: 50%; vertical-align: middle;"></span> Hospitals</span>
             <span><span style="display: inline-block; width: 10px; height: 10px; background: #e67e22; border-radius: 50%; vertical-align: middle;"></span> Fire Stations</span>
             <span><span style="display: inline-block; width: 10px; height: 10px; background: #2980b9; border-radius: 50%; vertical-align: middle;"></span> Police</span>
-            <span><span style="display: inline-block; width: 10px; height: 10px; background: #27ae60; border-radius: 50%; vertical-align: middle;"></span> Clinics & Others</span>
+            <span><span style="display: inline-block; width: 10px; height: 10px; background: #27ae60; border-radius: 50%; vertical-align: middle;"></span> Clinics &amp; Others</span>
           </div>
         </div>
 
@@ -194,8 +229,85 @@
     <!-- 2B. Incident Report Handling Menu          -->
     <!-- ========================================== -->
     <section id="section-incidents" style="display: none;">
-      <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh; text-align: center;">
-        <h1 style="font-size: 56px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
+      <div style="display: flex; justify-content: center; align-items: center; min-height: 25vh; text-align: center;">
+        <h1 style="font-size: 48px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
+      </div>
+
+      <!-- Developer Test Dispatch Alert Box (C3) -->
+      <div id="dispatcher-alert-test-box" style="margin: 20px auto; max-width: 850px; border: 1px solid #ccc; padding: 20px; background: #fafafa;">
+        <h3 style="margin-top: 0; color: #333;">Developer test: send a dispatch alert to a unit</h3>
+        <form id="form-test-alert" onsubmit="return false;">
+          <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 12px;">
+            <div style="flex: 1.5; min-width: 220px;">
+              <label for="alert-unit-select"><strong>Target Service Unit:</strong></label>
+              <div style="display: flex; gap: 6px; margin-top: 4px;">
+                <select id="alert-unit-select" style="flex: 1; padding: 6px;"></select>
+                <button id="btn-refresh-units" type="button" style="padding: 6px 12px; cursor: pointer;">↻ Refresh</button>
+              </div>
+            </div>
+            <div style="flex: 1; min-width: 140px;">
+              <label for="alert-type"><strong>Alert Type:</strong></label>
+              <select id="alert-type" style="width: 100%; padding: 6px; margin-top: 4px;">
+                <option value="Medical" selected>Medical</option>
+                <option value="Fire">Fire</option>
+                <option value="Police">Police</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div style="flex: 0.7; min-width: 100px;">
+              <label for="alert-severity"><strong>Severity (1-5):</strong></label>
+              <input type="number" id="alert-severity" min="1" max="5" value="3" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            </div>
+            <div style="flex: 0.8; min-width: 110px;">
+              <label for="alert-people"><strong>People Affected:</strong></label>
+              <input type="number" id="alert-people" min="0" value="1" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            </div>
+          </div>
+
+          <div style="margin-bottom: 12px;">
+            <label for="alert-location"><strong>Location Text:</strong></label>
+            <input type="text" id="alert-location" value="12 Rue de Rivoli, Paris" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;" required>
+          </div>
+
+          <div style="display: flex; gap: 15px; margin-bottom: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 160px;">
+              <label for="alert-lat"><strong>Latitude (optional):</strong></label>
+              <input type="number" step="any" id="alert-lat" value="48.8584" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            </div>
+            <div style="flex: 1; min-width: 160px;">
+              <label for="alert-lon"><strong>Longitude (optional):</strong></label>
+              <input type="number" step="any" id="alert-lon" value="2.2945" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            </div>
+          </div>
+
+          <div style="margin-bottom: 12px;">
+            <label for="alert-note"><strong>Note / Instructions:</strong></label>
+            <input type="text" id="alert-note" placeholder="Provide emergency context or notes" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+          </div>
+
+          <div>
+            <button id="btn-send-alert" type="button" style="padding: 8px 22px; font-weight: bold; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">Send Dispatch Alert</button>
+            <span id="alert-send-feedback" style="margin-left: 12px; font-weight: bold; font-size: 13px;"></span>
+          </div>
+        </form>
+
+        <hr style="margin: 25px 0;">
+        <h4 style="margin: 0 0 10px 0;">Tracked Dispatch Alerts (Live Updates Every 3s)</h4>
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+          <thead>
+            <tr style="background: #e9ecef; border-bottom: 2px solid #ccc;">
+              <th style="padding: 8px;">ID</th>
+              <th style="padding: 8px;">Target Unit</th>
+              <th style="padding: 8px;">Type</th>
+              <th style="padding: 8px;">Severity</th>
+              <th style="padding: 8px;">State</th>
+              <th style="padding: 8px;">Created At</th>
+            </tr>
+          </thead>
+          <tbody id="alerts-table-body">
+            <tr><td colspan="6" style="padding: 10px; text-align: center; color: #777;">Loading alerts...</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -210,8 +322,25 @@
 
   </div>
 
+  <!-- ========================================== -->
+  <!-- 3. Unit View Container (Role: unit)        -->
+  <!-- ========================================== -->
+  <div id="unit-view" style="display: none; max-width: 900px; margin: 20px auto;">
+    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0066cc; padding-bottom: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+      <h2 style="margin: 0;">Service Unit Terminal: <span id="unit-header-name">Unit</span> (<span id="unit-header-kind">KIND</span>)</h2>
+      <button id="btn-unit-logout" style="background: #fee; border-color: #c00; padding: 6px 14px; cursor: pointer; border-radius: 3px;">Logout</button>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <button id="tab-unit-resources" style="padding: 8px 18px; font-weight: bold; cursor: pointer;">Availability &amp; Resources</button>
+      <button id="tab-unit-alerts" style="padding: 8px 18px; cursor: pointer;">Dispatch Alert <span id="badge-unit-pending" style="display: none; background: #d9534f; color: white; border-radius: 10px; padding: 2px 7px; font-size: 11px;">NEW</span></button>
+    </div>
+    <div id="view-unit-resources"></div>
+    <div id="view-unit-alerts" style="display: none;"></div>
+  </div>
+
   <script src="data/out/places.js"></script>
   <script src="data/out/roads.js"></script>
+  <script src="unit.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
