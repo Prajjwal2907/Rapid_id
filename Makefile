@@ -1,6 +1,9 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Iinclude $(EXTRA_INCLUDES)
-LDLIBS ?= -lcurl -lws2_32 -pthread
+LDLIBS ?= -lcurl -pthread
+ifeq ($(OS),Windows_NT)
+  LDLIBS += -lws2_32
+endif
 
 SRCS = $(filter-out src/main.cpp src/priority_queue.cpp,$(wildcard src/*.cpp))
 LIB_OBJS = $(patsubst src/%.cpp,build/%.o,$(SRCS))
