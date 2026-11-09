@@ -18,6 +18,11 @@ struct PathResult {
     std::vector<int> nodes;
 };
 
+struct DistanceMap {
+    std::vector<double> dist;
+    std::vector<int> pred;
+};
+
 class Graph {
 public:
     Graph() = default;
@@ -70,6 +75,19 @@ public:
     // if from or to is out of range or if no path exists between them.
     // If from == to and index is valid, returns found=true, distanceMeters=0.0, nodes={from}.
     PathResult shortestPath(int from, int to) const;
+
+    // Computes shortest paths from source node to all other nodes using Dijkstra's algorithm.
+    // Failure behavior: Returns empty dist and pred vectors if source < 0 or source >= nodeCount().
+    // For reachable nodes, dist contains the shortest distance in meters, and pred contains the predecessor node index.
+    // For unreachable nodes, dist is std::numeric_limits<double>::infinity(), and pred is -1.
+    // For source itself, dist[source] is 0.0, and pred[source] is -1.
+    DistanceMap shortestPathsFrom(int source) const;
+
+    // Reconstructs the node index sequence from source to target using a previously computed DistanceMap.
+    // Failure behavior: Returns an empty vector if source or target is out of range, if m is invalid/empty,
+    // or if target is unreachable from source (dist is infinity or target != source and pred is -1).
+    // If source == target and valid, returns {source}.
+    std::vector<int> pathFromMap(const DistanceMap& m, int source, int target) const;
 
     // Returns a new Graph containing only the largest connected component, preserving
     // OSM IDs and coordinates. Uses an iterative traversal.

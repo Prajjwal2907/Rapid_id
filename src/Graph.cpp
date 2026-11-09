@@ -2,6 +2,7 @@
 #include "GeoMath.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <queue>
 #include <utility>
@@ -248,6 +249,80 @@ Graph Graph::largestComponent() const {
     }
 
     return componentGraph;
+}
+
+DistanceMap Graph::shortestPathsFrom(int source) const {
+    int totalNodes = static_cast<int>(m_nodes.size());
+    if (source < 0 || source >= totalNodes) {
+        return DistanceMap{{}, {}};
+    }
+
+    const double kInfinity = std::numeric_limits<double>::infinity();
+    std::vector<double> dist(totalNodes, kInfinity);
+    std::vector<int> pred(totalNodes, -1);
+
+    using QueueElement = std::pair<double, int>;
+    std::priority_queue<QueueElement, std::vector<QueueElement>, std::greater<QueueElement>> pq;
+
+    dist[source] = 0.0;
+    pq.push({0.0, source});
+
+    while (!pq.empty()) {
+        auto [currentDist, u] = pq.top();
+        pq.pop();
+
+        if (currentDist > dist[u]) {
+            continue;
+        }
+
+        for (const auto& edge : m_nodes[u].edges) {
+            int v = edge.to;
+            double nextDist = dist[u] + edge.weightMeters;
+            if (nextDist < dist[v]) {
+                dist[v] = nextDist;
+                pred[v] = u;
+                pq.push({nextDist, v});
+            }
+        }
+    }
+
+    return DistanceMap{std::move(dist), std::move(pred)};
+}
+
+std::vector<int> Graph::pathFromMap(const DistanceMap& m, int source, int target) const {
+    int totalNodes = static_cast<int>(m_nodes.size());
+    if (source < 0 || source >= totalNodes || target < 0 || target >= totalNodes) {
+        return {};
+    }
+    if (static_cast<int>(m.dist.size()) != totalNodes || static_cast<int>(m.pred.size()) != totalNodes) {
+        return {};
+    }
+    if (std::isinf(m.dist[target])) {
+        return {};
+    }
+    if (source == target) {
+        return {source};
+    }
+
+    std::vector<int> path;
+    int curr = target;
+    while (curr != -1) {
+        path.push_back(curr);
+        if (curr == source) {
+            break;
+        }
+        curr = m.pred[curr];
+        if (static_cast<int>(path.size()) > totalNodes) {
+            return {};
+        }
+    }
+
+    if (path.back() != source) {
+        return {};
+    }
+
+    std::reverse(path.begin(), path.end());
+    return path;
 }
 
 } // namespace rapidaid::graph
