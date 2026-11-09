@@ -6,6 +6,10 @@
 #include <thread>
 #include <cctype>
 #include <algorithm>
+#include <cmath>
+#include <sstream>
+#include <locale>
+#include <iomanip>
 
 namespace rapidaid::geo {
 
@@ -100,6 +104,118 @@ namespace rapidaid::geo {
 
     std::optional<Location> Geocoder::geocode(const std::string& query) {
         return parseResponse(fetchRaw(query));
+    }
+
+    ViewBox Geocoder::viewBoxAround(double lat, double lon, int radiusMeters) {
+        if (radiusMeters <= 0) {
+            return ViewBox{lon, lat, lon, lat};
+        }
+
+        constexpr double EARTH_RADIUS_M = 6378137.0;
+        constexpr double PI = 3.14159265358979323846;
+
+        double deltaLatRad = static_cast<double>(radiusMeters) / EARTH_RADIUS_M;
+        double deltaLat = deltaLatRad * (180.0 / PI);
+
+        double latRad = lat * (PI / 180.0);
+        double cosLat = std::cos(latRad);
+        double deltaLon = 0.0;
+        if (std::abs(cosLat) > 1e-12) {
+            deltaLon = deltaLat / std::abs(cosLat);
+        } else {
+            deltaLon = deltaLat;
+        }
+
+        double minLon = lon - deltaLon;
+        double minLat = lat - deltaLat;
+        double maxLon = lon + deltaLon;
+        double maxLat = lat + deltaLat;
+
+        return ViewBox{minLon, minLat, maxLon, maxLat};
+    }
+
+    std::string Geocoder::buildSearchUrl(const std::string& query, const ViewBox& box, int limit) {
+        std::ostringstream ss;
+        ss.imbue(std::locale::classic());
+
+        ss << "https://nominatim.openstreetmap.org/search?q="
+           << rapidaid::net::HttpClient::urlEncode(query)
+           << "&format=json&limit=" << limit
+           << "&viewbox=" << box.minLon << "," << box.maxLat << "," << box.maxLon << "," << box.minLat
+           << "&bounded=1";
+
+        return ss.str();
+    }
+
+    std::string Geocoder::fetchRawMany(const std::string& query, const ViewBox& box, int limit) {
+        if (isAllWhitespaceOrEmpty(query)) {
+            return "";
+        }
+
+        enforceRateLimit();
+
+        std::string url = buildSearchUrl(query, box, limit);
+        return rapidaid::net::HttpClient::get(url);
+    }
+
+    std::vector<Location> Geocoder::parseMany(const std::string& body) {
+        if (body.empty()) {
+            return {};
+        }
+
+        std::vector<Location> results;
+        try {
+            auto parsed = nlohmann::json::parse(body);
+            if (!parsed.is_array()) {
+                return {};
+            }
+
+            for (const auto& item : parsed) {
+                if (!item.is_object() || !item.contains("lat") || !item.contains("lon")) {
+                    continue;
+                }
+
+                const auto& latVal = item["lat"];
+                const auto& lonVal = item["lon"];
+
+                double lat = 0.0;
+                double lon = 0.0;
+
+                if (latVal.is_string() && lonVal.is_string()) {
+                    std::string latStr = latVal.get<std::string>();
+                    std::string lonStr = lonVal.get<std::string>();
+
+                    std::size_t latIdx = 0;
+                    std::size_t lonIdx = 0;
+                    try {
+                        lat = std::stod(latStr, &latIdx);
+                        lon = std::stod(lonStr, &lonIdx);
+                    } catch (...) {
+                        continue;
+                    }
+
+                    if (latIdx != latStr.size() || lonIdx != lonStr.size()) {
+                        continue;
+                    }
+                } else if (latVal.is_number() && lonVal.is_number()) {
+                    lat = latVal.get<double>();
+                    lon = lonVal.get<double>();
+                } else {
+                    continue;
+                }
+
+                std::string displayName;
+                if (item.contains("display_name") && item["display_name"].is_string()) {
+                    displayName = item["display_name"].get<std::string>();
+                }
+
+                results.push_back(Location{lat, lon, displayName});
+            }
+        } catch (const nlohmann::json::exception&) {
+            return {};
+        }
+
+        return results;
     }
 
 } // namespace rapidaid::geo
