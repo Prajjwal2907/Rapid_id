@@ -2,9 +2,12 @@
 #define RAPIDAID_UI_UNITREGISTRY_HPP
 
 #include "Ambulance.hpp"
+#include "DispatchEngine.hpp"
 #include "Fire_station.hpp"
 #include "Fire_truck.hpp"
+#include "Graph.hpp"
 #include "Hospital.hpp"
+#include "Incident.hpp"
 #include "Police_station.hpp"
 #include "Police_unit.hpp"
 #include "Shelter.hpp"
@@ -61,7 +64,44 @@ struct Alert {
     int ackSeconds{60};
     std::string state{"Pending"}; // Pending, Accepted, Declined, EnRoute, OnScene, Transporting, Cleared
     std::string reason;
+
+    int incidentId{0};
+    std::string role; // "primary", "standby", "support"
+    double distanceMeters{0.0};
+    std::vector<std::vector<double>> routeCoordinates; // [[lon, lat], ...]
 };
+
+/**
+ * @brief Serializes Alert to JSON.
+ * @param j JSON output object.
+ * @param a Alert to serialize.
+ * Failure behavior: Never throws.
+ */
+void to_json(nlohmann::json& j, const Alert& a);
+
+/**
+ * @brief Deserializes Alert from JSON with backwards compatibility.
+ * @param j JSON input object.
+ * @param a Alert to populate.
+ * Failure behavior: Tolerates missing fields with default values. Never throws.
+ */
+void from_json(const nlohmann::json& j, Alert& a);
+
+/**
+ * @brief Serializes Alert to ordered_json.
+ * @param j JSON output object.
+ * @param a Alert to serialize.
+ * Failure behavior: Never throws.
+ */
+void to_json(nlohmann::ordered_json& j, const Alert& a);
+
+/**
+ * @brief Deserializes Alert from ordered_json with backwards compatibility.
+ * @param j JSON input object.
+ * @param a Alert to populate.
+ * Failure behavior: Tolerates missing fields with default values. Never throws.
+ */
+void from_json(const nlohmann::ordered_json& j, Alert& a);
 
 /**
  * @struct RegisteredUnitRecord
@@ -249,6 +289,91 @@ public:
      */
     nlohmann::ordered_json listAlertsJson() const;
 
+    /**
+     * @brief Collects and evaluates all registered units as dispatch candidates against the graph.
+     * @param graph Road network graph used to locate nearest road nodes.
+     * @return Vector of Candidate objects. Never throws.
+     * Failure behavior: For units further than 1500m from any graph node or if nearestNode returns -1,
+     * candidate nodeIndex is set to -1.
+     */
+    std::vector<rapidaid::dispatch::Candidate> listCandidates(const rapidaid::graph::Graph& graph);
+
+    /**
+     * @brief Creates and sends an incident dispatch alert to a specific unit.
+     * @param username Receiving unit username.
+     * @param incidentId Associated incident ID.
+     * @param role Dispatch role ("primary", "standby", "support").
+     * @param distanceMeters Distance in meters along the road network.
+     * @param routeCoordinates List of [lon, lat] coordinates forming the route polyline.
+     * @param type Incident type (e.g., "Medical", "Fire", "Police").
+     * @param severity Incident severity level (1-5).
+     * @param peopleAffected Count of people requiring assistance.
+     * @param locationText Human-readable location description.
+     * @param lat Incident latitude.
+     * @param lon Incident longitude.
+     * @param note Optional dispatch note.
+     * @param ackSeconds Timeout in seconds to acknowledge dispatch (default 60).
+     * @return Alert instance on success, or std::nullopt if unit not found, busy, or unavailable. Never throws.
+     * Failure behavior: Returns std::nullopt if the unit does not exist, is unavailable,
+     * or already has an active pending/accepted alert.
+     */
+    std::optional<Alert> sendDispatchAlert(const std::string& username,
+                                           int incidentId,
+                                           const std::string& role,
+                                           double distanceMeters,
+                                           const std::vector<std::vector<double>>& routeCoordinates,
+                                           const std::string& type,
+                                           int severity,
+                                           int peopleAffected,
+                                           const std::string& locationText,
+                                           double lat,
+                                           double lon,
+                                           const std::string& note,
+                                           int ackSeconds = 60);
+
+    /**
+     * @brief Closes a specific alert with a terminal state and releases the assigned unit.
+     * @param alertId Alert ID to close.
+     * @param finalState Final state ("Declined", "Cleared", or "Cancelled").
+     * @param reason Optional explanation for closure or decline.
+     * @return true on success; false if alertId not found or finalState is invalid. Never throws.
+     * Failure behavior: Returns false if alertId is not found or finalState is not a valid terminal state.
+     */
+    bool closeAlert(int alertId, const std::string& finalState, const std::string& reason);
+
+    /**
+     * @brief Closes all active alerts associated with a specific incident.
+     * @param incidentId Incident ID whose active alerts should be closed.
+     * @param reason Reason for closure (e.g. "Incident resolved").
+     * @return Count of alerts closed (>= 0). Never throws.
+     * Failure behavior: If no matching active alerts exist, returns 0 without modifying state.
+     */
+    int closeAlertsForIncident(int incidentId, const std::string& reason);
+
+    /**
+     * @brief Finds an alert by ID (const overload).
+     * @param alertId Alert ID to look up.
+     * @return Pointer to Alert if found; nullptr otherwise. Never throws.
+     * Failure behavior: Returns nullptr if alertId is not found.
+     */
+    const Alert* findAlert(int alertId) const;
+
+    /**
+     * @brief Finds an alert by ID (non-const overload).
+     * @param alertId Alert ID to look up.
+     * @return Pointer to Alert if found; nullptr otherwise. Never throws.
+     * Failure behavior: Returns nullptr if alertId is not found.
+     */
+    Alert* findAlert(int alertId);
+
+    /**
+     * @brief Retrieves all alerts associated with a specific incident ID.
+     * @param incidentId Incident ID.
+     * @return Vector of Alert instances matching incidentId. Never throws.
+     * Failure behavior: Returns an empty vector if no alerts match incidentId.
+     */
+    std::vector<Alert> alertsForIncident(int incidentId) const;
+
 private:
     std::string dataPath_;
     std::unordered_map<std::string, RegisteredUnitRecord> units_;
@@ -257,6 +382,8 @@ private:
     bool loaded_{false};
 
     void reinstantiateMobile(RegisteredUnitRecord& rec, int newCount);
+    std::string getAlertsPath(const std::string& target) const;
+    void reconcileAlertsAndUnits();
 };
 
 } // namespace rapidaid::ui

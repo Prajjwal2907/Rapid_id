@@ -1,5 +1,6 @@
 #include "UnitRegistry.hpp"
 #include "FileStore.hpp"
+#include "GeoMath.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -13,6 +14,90 @@
 namespace fs = std::filesystem;
 
 namespace rapidaid::ui {
+
+namespace {
+
+template <typename BasicJsonType>
+void alertToJson(BasicJsonType& j, const Alert& a) {
+    j = BasicJsonType{
+        {"id", a.id},
+        {"toUser", a.toUser},
+        {"type", a.type},
+        {"severity", a.severity},
+        {"peopleAffected", a.peopleAffected},
+        {"locationText", a.locationText},
+        {"note", a.note},
+        {"createdAt", a.createdAt},
+        {"ackSeconds", a.ackSeconds},
+        {"state", a.state},
+        {"reason", a.reason},
+        {"incidentId", a.incidentId},
+        {"role", a.role},
+        {"distanceMeters", a.distanceMeters},
+        {"routeCoordinates", a.routeCoordinates}
+    };
+    if (a.lat.has_value()) {
+        j["lat"] = *a.lat;
+    } else {
+        j["lat"] = nullptr;
+    }
+    if (a.lon.has_value()) {
+        j["lon"] = *a.lon;
+    } else {
+        j["lon"] = nullptr;
+    }
+}
+
+template <typename BasicJsonType>
+void alertFromJson(const BasicJsonType& j, Alert& a) {
+    a.id = j.value("id", 0);
+    a.toUser = j.value("toUser", "");
+    a.type = j.value("type", "Medical");
+    a.severity = j.value("severity", 3);
+    a.peopleAffected = j.value("peopleAffected", 0);
+    a.locationText = j.value("locationText", "");
+    if (j.contains("lat") && !j["lat"].is_null()) {
+        a.lat = j["lat"].template get<double>();
+    } else {
+        a.lat = std::nullopt;
+    }
+    if (j.contains("lon") && !j["lon"].is_null()) {
+        a.lon = j["lon"].template get<double>();
+    } else {
+        a.lon = std::nullopt;
+    }
+    a.note = j.value("note", "");
+    a.createdAt = j.value("createdAt", static_cast<int64_t>(0));
+    a.ackSeconds = j.value("ackSeconds", 60);
+    a.state = j.value("state", "Pending");
+    a.reason = j.value("reason", "");
+    a.incidentId = j.value("incidentId", 0);
+    a.role = j.value("role", "");
+    a.distanceMeters = j.value("distanceMeters", 0.0);
+    if (j.contains("routeCoordinates") && j["routeCoordinates"].is_array()) {
+        a.routeCoordinates = j["routeCoordinates"].template get<std::vector<std::vector<double>>>();
+    } else {
+        a.routeCoordinates.clear();
+    }
+}
+
+} // namespace
+
+void to_json(nlohmann::json& j, const Alert& a) {
+    alertToJson(j, a);
+}
+
+void from_json(const nlohmann::json& j, Alert& a) {
+    alertFromJson(j, a);
+}
+
+void to_json(nlohmann::ordered_json& j, const Alert& a) {
+    alertToJson(j, a);
+}
+
+void from_json(const nlohmann::ordered_json& j, Alert& a) {
+    alertFromJson(j, a);
+}
 
 std::string RegisteredUnitRecord::getStatusString() const {
     if (profile.kind == "ambulance" && ambulance) {
@@ -73,140 +158,226 @@ void UnitRegistry::clear() {
     loaded_ = true;
 }
 
+std::string UnitRegistry::getAlertsPath(const std::string& target) const {
+    fs::path p(target.empty() ? dataPath_ : target);
+    if (p.has_parent_path()) {
+        return (p.parent_path() / "alerts.json").generic_string();
+    }
+    return "alerts.json";
+}
+
+void UnitRegistry::reconcileAlertsAndUnits() {
+    for (auto& [username, rec] : units_) {
+        const Alert* activeAlert = nullptr;
+        for (const auto& a : alerts_) {
+            if (a.toUser == username && a.state != "Cleared" && a.state != "Declined") {
+                activeAlert = &a;
+                break;
+            }
+        }
+
+        if (activeAlert) {
+            rec.openAlertId = activeAlert->id;
+            if (activeAlert->state == "Pending") {
+                if (rec.ambulance && rec.ambulance->getStatus() == rapidaid::service::Ambulance::Status::Dispatched) {
+                    rec.ambulance->release();
+                }
+                if (rec.fireTruck && rec.fireTruck->getStatus() == rapidaid::service::FireTruck::Status::Dispatched) {
+                    rec.fireTruck->release();
+                }
+                if (rec.policeUnit && rec.policeUnit->getStatus() == rapidaid::service::PoliceUnit::Status::Dispatched) {
+                    rec.policeUnit->release();
+                }
+            } else if (activeAlert->state == "Accepted" || activeAlert->state == "EnRoute" ||
+                       activeAlert->state == "OnScene" || activeAlert->state == "Transporting") {
+                if (rec.ambulance) {
+                    if (!rec.ambulance->isAvailable()) rec.ambulance->release();
+                    rec.ambulance->assign(activeAlert->id);
+                }
+                if (rec.fireTruck) {
+                    if (!rec.fireTruck->isAvailable()) rec.fireTruck->release();
+                    rec.fireTruck->assign(activeAlert->id);
+                }
+                if (rec.policeUnit) {
+                    if (!rec.policeUnit->isAvailable()) rec.policeUnit->release();
+                    rec.policeUnit->assign(activeAlert->id);
+                }
+            }
+        } else {
+            rec.openAlertId = -1;
+            if (rec.ambulance && rec.ambulance->getStatus() == rapidaid::service::Ambulance::Status::Dispatched) {
+                rec.ambulance->release();
+            }
+            if (rec.fireTruck && rec.fireTruck->getStatus() == rapidaid::service::FireTruck::Status::Dispatched) {
+                rec.fireTruck->release();
+            }
+            if (rec.policeUnit && rec.policeUnit->getStatus() == rapidaid::service::PoliceUnit::Status::Dispatched) {
+                rec.policeUnit->release();
+            }
+        }
+    }
+}
+
 bool UnitRegistry::load(const std::string& path) {
     std::string target = path.empty() ? dataPath_ : path;
     loaded_ = true;
     units_.clear();
+    alerts_.clear();
+    nextAlertId_ = 1;
 
     std::error_code ec;
-    if (!fs::exists(target, ec)) {
-        return true;
-    }
-
-    std::string content = rapidaid::io::FileStore::load(target);
-    if (content.empty()) {
-        return true;
-    }
-
-    try {
-        nlohmann::json j = nlohmann::json::parse(content);
-        if (!j.is_array()) {
-            return false;
-        }
-
-        for (const auto& item : j) {
-            if (!item.is_object()) continue;
-            UnitProfile prof;
-            prof.username = item.value("username", "");
-            prof.kind = item.value("kind", "");
-            prof.name = item.value("name", "");
-            prof.lat = item.value("lat", 0.0);
-            prof.lon = item.value("lon", 0.0);
-            prof.count = item.value("count", 0);
-
-            if (prof.username.empty() || prof.kind.empty()) continue;
-
-            RegisteredUnitRecord rec;
-            rec.profile = prof;
-
+    bool targetExists = fs::exists(target, ec);
+    if (targetExists) {
+        std::string content = rapidaid::io::FileStore::load(target);
+        if (!content.empty()) {
             try {
-                if (prof.kind == "ambulance") {
-                    rec.ambulance = std::make_unique<rapidaid::service::Ambulance>(
-                        1, prof.name, prof.lat, prof.lon, 0, prof.count);
-                    std::string st = item.value("status", "Available");
-                    if (st == "Unavailable") {
-                        rec.ambulance->markUnavailable();
-                    }
-                } else if (prof.kind == "fire_truck") {
-                    rec.fireTruck = std::make_unique<rapidaid::service::FireTruck>(
-                        1, prof.name, prof.lat, prof.lon, 0, prof.count);
-                    std::string st = item.value("status", "Available");
-                    if (st == "Unavailable") {
-                        rec.fireTruck->markUnavailable();
-                    }
-                } else if (prof.kind == "police_unit") {
-                    rec.policeUnit = std::make_unique<rapidaid::service::PoliceUnit>(
-                        1, prof.name, prof.lat, prof.lon, 0, prof.count);
-                    std::string st = item.value("status", "Available");
-                    if (st == "Unavailable") {
-                        rec.policeUnit->markUnavailable();
-                    }
-                } else if (prof.kind == "hospital") {
-                    int occ = item.value("occupiedBeds", 0);
-                    rec.hospital = std::make_unique<rapidaid::service::Hospital>(
-                        1, prof.name, prof.lat, prof.lon, prof.count, 0);
-                    if (occ > 0) {
-                        rec.hospital->admitPatients(occ);
-                    }
-                    if (item.contains("subunits") && item["subunits"].is_array()) {
-                        for (const auto& sub : item["subunits"]) {
-                            int sid = sub.value("id", rec.nextSubunitId++);
-                            std::string sname = sub.value("name", "Ambulance");
-                            int scount = sub.value("count", 0);
-                            bool savail = sub.value("available", true);
-                            rapidaid::service::Ambulance amb(sid, sname, prof.lat, prof.lon, 1, scount);
-                            if (!savail) {
-                                amb.markUnavailable();
+                nlohmann::json j = nlohmann::json::parse(content);
+                if (!j.is_array()) {
+                    return false;
+                }
+
+                for (const auto& item : j) {
+                    if (!item.is_object()) continue;
+                    UnitProfile prof;
+                    prof.username = item.value("username", "");
+                    prof.kind = item.value("kind", "");
+                    prof.name = item.value("name", "");
+                    prof.lat = item.value("lat", 0.0);
+                    prof.lon = item.value("lon", 0.0);
+                    prof.count = item.value("count", 0);
+
+                    if (prof.username.empty() || prof.kind.empty()) continue;
+
+                    RegisteredUnitRecord rec;
+                    rec.profile = prof;
+
+                    try {
+                        if (prof.kind == "ambulance") {
+                            rec.ambulance = std::make_unique<rapidaid::service::Ambulance>(
+                                1, prof.name, prof.lat, prof.lon, 0, prof.count);
+                            std::string st = item.value("status", "Available");
+                            if (st == "Unavailable") {
+                                rec.ambulance->markUnavailable();
                             }
-                            rec.hospital->addAmbulance(std::move(amb));
-                            rec.subunits.push_back({sid, sname, scount, savail});
-                            if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
-                        }
-                    }
-                } else if (prof.kind == "fire_station") {
-                    rec.fireStation = std::make_unique<rapidaid::service::FireStation>(
-                        1, prof.name, prof.lat, prof.lon);
-                    if (item.contains("subunits") && item["subunits"].is_array()) {
-                        for (const auto& sub : item["subunits"]) {
-                            int sid = sub.value("id", rec.nextSubunitId++);
-                            std::string sname = sub.value("name", "Truck");
-                            int scount = sub.value("count", 0);
-                            bool savail = sub.value("available", true);
-                            rapidaid::service::FireTruck truck(sid, sname, prof.lat, prof.lon, 1, scount);
-                            if (!savail) {
-                                truck.markUnavailable();
+                        } else if (prof.kind == "fire_truck") {
+                            rec.fireTruck = std::make_unique<rapidaid::service::FireTruck>(
+                                1, prof.name, prof.lat, prof.lon, 0, prof.count);
+                            std::string st = item.value("status", "Available");
+                            if (st == "Unavailable") {
+                                rec.fireTruck->markUnavailable();
                             }
-                            rec.fireStation->addTruck(std::move(truck));
-                            rec.subunits.push_back({sid, sname, scount, savail});
-                            if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
-                        }
-                    }
-                } else if (prof.kind == "police_station") {
-                    rec.policeStation = std::make_unique<rapidaid::service::PoliceStation>(
-                        1, prof.name, prof.lat, prof.lon);
-                    if (item.contains("subunits") && item["subunits"].is_array()) {
-                        for (const auto& sub : item["subunits"]) {
-                            int sid = sub.value("id", rec.nextSubunitId++);
-                            std::string sname = sub.value("name", "Unit");
-                            int scount = sub.value("count", 0);
-                            bool savail = sub.value("available", true);
-                            rapidaid::service::PoliceUnit unit(sid, sname, prof.lat, prof.lon, 1, scount);
-                            if (!savail) {
-                                unit.markUnavailable();
+                        } else if (prof.kind == "police_unit") {
+                            rec.policeUnit = std::make_unique<rapidaid::service::PoliceUnit>(
+                                1, prof.name, prof.lat, prof.lon, 0, prof.count);
+                            std::string st = item.value("status", "Available");
+                            if (st == "Unavailable") {
+                                rec.policeUnit->markUnavailable();
                             }
-                            rec.policeStation->addUnit(std::move(unit));
-                            rec.subunits.push_back({sid, sname, scount, savail});
-                            if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
+                        } else if (prof.kind == "hospital") {
+                            int occ = item.value("occupiedBeds", 0);
+                            rec.hospital = std::make_unique<rapidaid::service::Hospital>(
+                                1, prof.name, prof.lat, prof.lon, prof.count, 0);
+                            if (occ > 0) {
+                                rec.hospital->admitPatients(occ);
+                            }
+                            if (item.contains("subunits") && item["subunits"].is_array()) {
+                                for (const auto& sub : item["subunits"]) {
+                                    int sid = sub.value("id", rec.nextSubunitId++);
+                                    std::string sname = sub.value("name", "Ambulance");
+                                    int scount = sub.value("count", 0);
+                                    bool savail = sub.value("available", true);
+                                    rapidaid::service::Ambulance amb(sid, sname, prof.lat, prof.lon, 1, scount);
+                                    if (!savail) {
+                                        amb.markUnavailable();
+                                    }
+                                    rec.hospital->addAmbulance(std::move(amb));
+                                    rec.subunits.push_back({sid, sname, scount, savail});
+                                    if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
+                                }
+                            }
+                        } else if (prof.kind == "fire_station") {
+                            rec.fireStation = std::make_unique<rapidaid::service::FireStation>(
+                                1, prof.name, prof.lat, prof.lon);
+                            if (item.contains("subunits") && item["subunits"].is_array()) {
+                                for (const auto& sub : item["subunits"]) {
+                                    int sid = sub.value("id", rec.nextSubunitId++);
+                                    std::string sname = sub.value("name", "Truck");
+                                    int scount = sub.value("count", 0);
+                                    bool savail = sub.value("available", true);
+                                    rapidaid::service::FireTruck truck(sid, sname, prof.lat, prof.lon, 1, scount);
+                                    if (!savail) {
+                                        truck.markUnavailable();
+                                    }
+                                    rec.fireStation->addTruck(std::move(truck));
+                                    rec.subunits.push_back({sid, sname, scount, savail});
+                                    if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
+                                }
+                            }
+                        } else if (prof.kind == "police_station") {
+                            rec.policeStation = std::make_unique<rapidaid::service::PoliceStation>(
+                                1, prof.name, prof.lat, prof.lon);
+                            if (item.contains("subunits") && item["subunits"].is_array()) {
+                                for (const auto& sub : item["subunits"]) {
+                                    int sid = sub.value("id", rec.nextSubunitId++);
+                                    std::string sname = sub.value("name", "Unit");
+                                    int scount = sub.value("count", 0);
+                                    bool savail = sub.value("available", true);
+                                    rapidaid::service::PoliceUnit unit(sid, sname, prof.lat, prof.lon, 1, scount);
+                                    if (!savail) {
+                                        unit.markUnavailable();
+                                    }
+                                    rec.policeStation->addUnit(std::move(unit));
+                                    rec.subunits.push_back({sid, sname, scount, savail});
+                                    if (sid >= rec.nextSubunitId) rec.nextSubunitId = sid + 1;
+                                }
+                            }
+                        } else if (prof.kind == "shelter") {
+                            int occ = item.value("occupied", 0);
+                            rec.shelter = std::make_unique<rapidaid::service::Shelter>(
+                                1, prof.name, prof.lat, prof.lon, prof.count, 0);
+                            if (occ > 0) {
+                                rec.shelter->admit(occ);
+                            }
                         }
-                    }
-                } else if (prof.kind == "shelter") {
-                    int occ = item.value("occupied", 0);
-                    rec.shelter = std::make_unique<rapidaid::service::Shelter>(
-                        1, prof.name, prof.lat, prof.lon, prof.count, 0);
-                    if (occ > 0) {
-                        rec.shelter->admit(occ);
+                        units_[prof.username] = std::move(rec);
+                    } catch (...) {
+                        // Ignore single malformed entry
                     }
                 }
-                units_[prof.username] = std::move(rec);
             } catch (...) {
-                // Ignore single malformed entry
+                units_.clear();
+                return false;
             }
         }
-        return true;
-    } catch (...) {
-        units_.clear();
-        return false;
     }
+
+    std::string alertsTarget = getAlertsPath(target);
+    std::error_code aec;
+    if (fs::exists(alertsTarget, aec)) {
+        std::string acontent = rapidaid::io::FileStore::load(alertsTarget);
+        if (!acontent.empty()) {
+            try {
+                nlohmann::json aj = nlohmann::json::parse(acontent);
+                if (aj.is_array()) {
+                    for (const auto& item : aj) {
+                        if (!item.is_object()) continue;
+                        Alert a;
+                        from_json(item, a);
+                        if (a.id >= nextAlertId_) {
+                            nextAlertId_ = a.id + 1;
+                        }
+                        alerts_.push_back(std::move(a));
+                    }
+                }
+            } catch (...) {
+                // Tolerant of missing or corrupt alerts.json
+                alerts_.clear();
+            }
+        }
+    }
+
+    reconcileAlertsAndUnits();
+    return true;
 }
 
 bool UnitRegistry::save(const std::string& path) const {
@@ -260,7 +431,39 @@ bool UnitRegistry::save(const std::string& path) const {
         out.close();
 
         fs::rename(tmpFile, target, ec);
-        return !ec;
+        if (ec) {
+            fs::remove(tmpFile, ec);
+            return false;
+        }
+
+        nlohmann::ordered_json rootAlerts = nlohmann::json::array();
+        for (const auto& a : alerts_) {
+            nlohmann::ordered_json aj;
+            to_json(aj, a);
+            rootAlerts.push_back(std::move(aj));
+        }
+
+        std::string alertsTarget = getAlertsPath(target);
+        fs::path ap(alertsTarget);
+        if (ap.has_parent_path()) {
+            fs::create_directories(ap.parent_path(), ec);
+        }
+
+        std::string tmpAlertsFile = alertsTarget + ".tmp";
+        std::ofstream aout(tmpAlertsFile, std::ios::trunc);
+        if (!aout.is_open()) {
+            return false;
+        }
+        aout << rootAlerts.dump(2);
+        aout.close();
+
+        fs::rename(tmpAlertsFile, alertsTarget, ec);
+        if (ec) {
+            fs::remove(tmpAlertsFile, ec);
+            return false;
+        }
+
+        return true;
     } catch (...) {
         return false;
     }
@@ -717,6 +920,10 @@ nlohmann::ordered_json UnitRegistry::getUnitStateJson(const std::string& usernam
         aj["secondsLeft"] = secondsLeft;
         aj["state"] = openA->state;
         if (!openA->reason.empty()) aj["reason"] = openA->reason;
+        aj["incidentId"] = openA->incidentId;
+        aj["role"] = openA->role;
+        aj["distanceMeters"] = openA->distanceMeters;
+        aj["routeCoordinates"] = openA->routeCoordinates;
         resp["openAlert"] = aj;
     } else {
         resp["openAlert"] = nullptr;
@@ -740,6 +947,10 @@ nlohmann::ordered_json UnitRegistry::getUnitStateJson(const std::string& usernam
             cj["createdAt"] = itA->createdAt;
             cj["state"] = itA->state;
             if (!itA->reason.empty()) cj["reason"] = itA->reason;
+            cj["incidentId"] = itA->incidentId;
+            cj["role"] = itA->role;
+            cj["distanceMeters"] = itA->distanceMeters;
+            cj["routeCoordinates"] = itA->routeCoordinates;
             recents.push_back(cj);
             countClosed++;
             if (countClosed >= 5) break;
@@ -821,6 +1032,7 @@ int UnitRegistry::sendAlert(const Alert& alert, std::string& errorMsg) {
 
     rec.openAlertId = newA.id;
     alerts_.push_back(newA);
+    save();
     return newA.id;
 }
 
@@ -966,6 +1178,10 @@ nlohmann::ordered_json UnitRegistry::listAlertsJson() const {
         aj["ackSeconds"] = a.ackSeconds;
         aj["state"] = a.state;
         if (!a.reason.empty()) aj["reason"] = a.reason;
+        aj["incidentId"] = a.incidentId;
+        aj["role"] = a.role;
+        aj["distanceMeters"] = a.distanceMeters;
+        aj["routeCoordinates"] = a.routeCoordinates;
         list.push_back(aj);
     }
 
@@ -973,6 +1189,227 @@ nlohmann::ordered_json UnitRegistry::listAlertsJson() const {
     resp["ok"] = true;
     resp["alerts"] = list;
     return resp;
+}
+
+std::vector<rapidaid::dispatch::Candidate> UnitRegistry::listCandidates(const rapidaid::graph::Graph& graph) {
+    ensureLoaded();
+    std::vector<rapidaid::dispatch::Candidate> candidates;
+
+    std::vector<std::string> usernames;
+    usernames.reserve(units_.size());
+    for (const auto& [u, _] : units_) {
+        (void)_;
+        usernames.push_back(u);
+    }
+    std::sort(usernames.begin(), usernames.end());
+
+    for (const auto& uname : usernames) {
+        auto& rec = units_[uname];
+        const std::string& kind = rec.profile.kind;
+
+        // Skip fire_station and police_station
+        if (kind != "ambulance" && kind != "fire_truck" && kind != "police_unit" &&
+            kind != "hospital" && kind != "shelter") {
+            continue;
+        }
+
+        rapidaid::dispatch::UnitKind unitKindEnum;
+        if (!rapidaid::dispatch::parseUnitKind(kind, unitKindEnum)) {
+            continue;
+        }
+
+        double distanceMeters = 0.0;
+        int nodeIdx = graph.nearestNode(rec.profile.lat, rec.profile.lon, &distanceMeters);
+        if (nodeIdx < 0 || distanceMeters > 1500.0) {
+            nodeIdx = -1;
+        }
+
+        long long osmId = (nodeIdx >= 0) ? graph.osmId(nodeIdx) : 0LL;
+        if (rec.profile.kind == "ambulance" && rec.ambulance) {
+            rec.ambulance->setGraphNodeId(osmId);
+        } else if (rec.profile.kind == "fire_truck" && rec.fireTruck) {
+            rec.fireTruck->setGraphNodeId(osmId);
+        } else if (rec.profile.kind == "police_unit" && rec.policeUnit) {
+            rec.policeUnit->setGraphNodeId(osmId);
+        } else if (rec.profile.kind == "hospital" && rec.hospital) {
+            rec.hospital->setGraphNodeId(osmId);
+        } else if (rec.profile.kind == "shelter" && rec.shelter) {
+            rec.shelter->setGraphNodeId(osmId);
+        }
+
+        rapidaid::dispatch::Candidate cand;
+        cand.username = rec.profile.username;
+        cand.name = rec.profile.name;
+        cand.kind = unitKindEnum;
+        cand.nodeIndex = nodeIdx;
+        cand.lat = rec.profile.lat;
+        cand.lon = rec.profile.lon;
+        cand.available = rec.isAvailable();
+
+        int cap = 0;
+        if (rec.profile.kind == "hospital" && rec.hospital) {
+            cap = rec.hospital->availableBeds();
+        } else if (rec.profile.kind == "shelter" && rec.shelter) {
+            cap = rec.shelter->availableSpace();
+        }
+        cand.capacity = cap;
+
+        candidates.push_back(std::move(cand));
+    }
+
+    return candidates;
+}
+
+std::optional<Alert> UnitRegistry::sendDispatchAlert(
+    const std::string& username,
+    int incidentId,
+    const std::string& role,
+    double distanceMeters,
+    const std::vector<std::vector<double>>& routeCoordinates,
+    const std::string& type,
+    int severity,
+    int peopleAffected,
+    const std::string& locationText,
+    double lat,
+    double lon,
+    const std::string& note,
+    int ackSeconds) {
+    ensureLoaded();
+
+    auto it = units_.find(username);
+    if (it == units_.end()) {
+        return std::nullopt;
+    }
+
+    RegisteredUnitRecord& rec = it->second;
+
+    for (const auto& a : alerts_) {
+        if (a.toUser == username && a.state != "Declined" && a.state != "Cleared") {
+            return std::nullopt;
+        }
+    }
+
+    if (!rec.isAvailable()) {
+        return std::nullopt;
+    }
+
+    Alert newA;
+    newA.id = nextAlertId_++;
+    newA.toUser = username;
+    newA.type = type.empty() ? "Medical" : type;
+    newA.severity = severity;
+    newA.peopleAffected = peopleAffected;
+    newA.locationText = locationText;
+    newA.lat = lat;
+    newA.lon = lon;
+    newA.note = note;
+    newA.createdAt = std::time(nullptr);
+    newA.ackSeconds = (ackSeconds > 0) ? ackSeconds : 60;
+    newA.state = "Pending";
+    newA.reason = "";
+    newA.incidentId = incidentId;
+    newA.role = role;
+    newA.distanceMeters = distanceMeters;
+    newA.routeCoordinates = routeCoordinates;
+
+    rec.openAlertId = newA.id;
+    alerts_.push_back(newA);
+
+    save();
+    return newA;
+}
+
+bool UnitRegistry::closeAlert(int alertId, const std::string& finalState, const std::string& reason) {
+    ensureLoaded();
+
+    auto it = std::find_if(alerts_.begin(), alerts_.end(), [alertId](const Alert& a) {
+        return a.id == alertId;
+    });
+    if (it == alerts_.end()) {
+        return false;
+    }
+
+    if (finalState != "Declined" && finalState != "Cleared" && finalState != "Cancelled") {
+        return false;
+    }
+
+    Alert& a = *it;
+    a.state = finalState;
+    a.reason = reason;
+
+    auto unitIt = units_.find(a.toUser);
+    if (unitIt != units_.end()) {
+        RegisteredUnitRecord& rec = unitIt->second;
+        if (rec.openAlertId == alertId) {
+            rec.openAlertId = -1;
+            if (rec.ambulance) rec.ambulance->release();
+            if (rec.fireTruck) rec.fireTruck->release();
+            if (rec.policeUnit) rec.policeUnit->release();
+        }
+    }
+
+    save();
+    return true;
+}
+
+int UnitRegistry::closeAlertsForIncident(int incidentId, const std::string& reason) {
+    ensureLoaded();
+
+    int count = 0;
+    for (auto& a : alerts_) {
+        if (a.incidentId == incidentId && a.state != "Cleared" && a.state != "Declined") {
+            a.state = "Cleared";
+            a.reason = reason;
+            count++;
+
+            auto unitIt = units_.find(a.toUser);
+            if (unitIt != units_.end()) {
+                RegisteredUnitRecord& rec = unitIt->second;
+                if (rec.openAlertId == a.id) {
+                    rec.openAlertId = -1;
+                    if (rec.ambulance) rec.ambulance->release();
+                    if (rec.fireTruck) rec.fireTruck->release();
+                    if (rec.policeUnit) rec.policeUnit->release();
+                }
+            }
+        }
+    }
+
+    if (count > 0) {
+        save();
+    }
+    return count;
+}
+
+const Alert* UnitRegistry::findAlert(int alertId) const {
+    const_cast<UnitRegistry*>(this)->ensureLoaded();
+    for (const auto& a : alerts_) {
+        if (a.id == alertId) {
+            return &a;
+        }
+    }
+    return nullptr;
+}
+
+Alert* UnitRegistry::findAlert(int alertId) {
+    ensureLoaded();
+    for (auto& a : alerts_) {
+        if (a.id == alertId) {
+            return &a;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<Alert> UnitRegistry::alertsForIncident(int incidentId) const {
+    const_cast<UnitRegistry*>(this)->ensureLoaded();
+    std::vector<Alert> res;
+    for (const auto& a : alerts_) {
+        if (a.incidentId == incidentId) {
+            res.push_back(a);
+        }
+    }
+    return res;
 }
 
 } // namespace rapidaid::ui
