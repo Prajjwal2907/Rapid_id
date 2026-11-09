@@ -18,6 +18,11 @@ window.RapidAidUnit = (function() {
   let activeTab = 'resources';
   let unitState = null;
   let inFlight = false;
+  let currentAlertMap = null;
+  let currentAlertId = null;
+  let currentCardRenderedState = null;
+  let currentPolyline = null;
+  let currentIncidentMarker = null;
 
   function getToken() {
     return sessionStorage.getItem('rapidaid_token') || '';
@@ -90,6 +95,7 @@ window.RapidAidUnit = (function() {
   function stop() {
     stopPolling();
     stopBeeping();
+    cleanupAlertMap();
     const unitView = document.getElementById('unit-view');
     if (unitView) unitView.style.display = 'none';
   }
@@ -138,6 +144,11 @@ window.RapidAidUnit = (function() {
         if (tabRes) tabRes.style.fontWeight = 'normal';
         document.getElementById('view-unit-alerts').style.display = 'block';
         document.getElementById('view-unit-resources').style.display = 'none';
+        if (currentAlertMap) {
+          setTimeout(() => {
+            try { currentAlertMap.invalidateSize(); } catch (e) {}
+          }, 100);
+        }
       };
     }
 
@@ -521,7 +532,16 @@ window.RapidAidUnit = (function() {
       table.style.fontSize = '13px';
 
       const thead = document.createElement('thead');
-      thead.innerHTML = '<tr style="border-bottom: 2px solid #ccc; text-align: left;"><th style="padding: 6px;">ID</th><th style="padding: 6px;">Name</th><th style="padding: 6px;">' + countLabel + '</th><th style="padding: 6px;">Status</th><th style="padding: 6px;">Action</th></tr>';
+      const trHead = document.createElement('tr');
+      trHead.style.borderBottom = '2px solid #ccc';
+      trHead.style.textAlign = 'left';
+      ['ID', 'Name', countLabel, 'Status', 'Action'].forEach(lbl => {
+        const th = document.createElement('th');
+        th.style.padding = '6px';
+        th.textContent = lbl;
+        trHead.appendChild(th);
+      });
+      thead.appendChild(trHead);
       table.appendChild(thead);
 
       const tbody = document.createElement('tbody');
@@ -624,218 +644,486 @@ window.RapidAidUnit = (function() {
   // =========================================================================
   // Tab 2: Dispatch Alert Rendering
   // =========================================================================
+  function cleanupAlertMap() {
+    if (currentAlertMap) {
+      try {
+        currentAlertMap.remove();
+      } catch (e) {}
+      currentAlertMap = null;
+    }
+    currentAlertId = null;
+    currentCardRenderedState = null;
+    currentPolyline = null;
+    currentIncidentMarker = null;
+  }
+
   function renderAlertsTab() {
     const container = document.getElementById('view-unit-alerts');
     if (!container || !unitState) return;
 
-    container.textContent = ''; // Clear cleanly
+    let alertSlot = document.getElementById('unit-alert-slot');
+    let historySlot = document.getElementById('unit-history-slot');
 
-    const openA = unitState.openAlert;
-    const kind = (unitState.profile && unitState.profile.kind) ? unitState.profile.kind : '';
+    if (!alertSlot || !historySlot) {
+      container.textContent = '';
+      alertSlot = document.createElement('div');
+      alertSlot.id = 'unit-alert-slot';
+      container.appendChild(alertSlot);
 
-    if (!openA) {
-      const noBox = document.createElement('div');
-      noBox.style.padding = '25px';
-      noBox.style.textAlign = 'center';
-      noBox.style.background = '#f0f9ff';
-      noBox.style.border = '1px solid #b8daff';
-      noBox.style.borderRadius = '4px';
-      noBox.style.marginBottom = '20px';
-
-      const noH3 = document.createElement('h3');
-      noH3.style.color = '#004085';
-      noH3.style.margin = '0 0 5px 0';
-      noH3.textContent = 'No Active Dispatch Alert';
-      noBox.appendChild(noH3);
-
-      const noP = document.createElement('p');
-      noP.style.margin = '0';
-      noP.style.color = '#555';
-      noP.textContent = 'Unit is on standby. Incoming dispatches will sound an audible alarm and appear here.';
-      noBox.appendChild(noP);
-      container.appendChild(noBox);
-    } else {
-      // Open Alert Card
-      const card = document.createElement('div');
-      card.style.padding = '20px';
-      card.style.border = '2px solid #d9534f';
-      card.style.borderRadius = '6px';
-      card.style.background = (openA.state === 'Pending') ? '#fff3cd' : '#ffffff';
-      card.style.boxShadow = '0 2px 6px rgba(0,0,0,0.1)';
-      card.style.marginBottom = '25px';
-
-      const cardHead = document.createElement('div');
-      cardHead.style.display = 'flex';
-      cardHead.style.justifyContent = 'space-between';
-      cardHead.style.alignItems = 'center';
-      cardHead.style.marginBottom = '12px';
-
-      const cTitle = document.createElement('h3');
-      cTitle.style.margin = '0';
-      cTitle.style.color = '#a71d2a';
-      cTitle.textContent = `Active Dispatch Alert #${openA.id} [${openA.state}]`;
-      cardHead.appendChild(cTitle);
-
-      const timerSpan = document.createElement('span');
-      timerSpan.style.fontWeight = 'bold';
-      timerSpan.style.fontSize = '14px';
-      if (openA.state === 'Pending') {
-        const secs = openA.secondsLeft !== undefined ? openA.secondsLeft : 60;
-        if (secs <= 0) {
-          timerSpan.textContent = 'Acknowledge: OVERDUE (0s)';
-          timerSpan.style.color = '#dc3545';
-        } else {
-          timerSpan.textContent = `Acknowledge in: ${secs}s`;
-          timerSpan.style.color = '#d39e00';
-        }
-      } else {
-        timerSpan.textContent = `State: ${openA.state}`;
-        timerSpan.style.color = '#28a745';
-      }
-      cardHead.appendChild(timerSpan);
-      card.appendChild(cardHead);
-
-      // Card Body Details
-      const detailsGrid = document.createElement('div');
-      detailsGrid.style.display = 'grid';
-      detailsGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(200px, 1fr))';
-      detailsGrid.style.gap = '10px';
-      detailsGrid.style.marginBottom = '15px';
-
-      const addField = (lbl, val) => {
-        const p = document.createElement('p');
-        p.style.margin = '0';
-        const st = document.createElement('strong');
-        st.textContent = lbl + ': ';
-        p.appendChild(st);
-        const sp = document.createElement('span');
-        sp.textContent = val !== undefined && val !== null ? val : 'N/A';
-        p.appendChild(sp);
-        detailsGrid.appendChild(p);
-      };
-
-      addField('Emergency Type', openA.type);
-      addField('Severity Level', `${openA.severity} / 5`);
-      addField('People Affected', openA.peopleAffected);
-      addField('Location', openA.locationText);
-      if (openA.lat !== undefined && openA.lon !== undefined) {
-        addField('Coordinates', `${Number(openA.lat).toFixed(5)}, ${Number(openA.lon).toFixed(5)}`);
-      }
-      addField('Dispatcher Note', openA.note || 'None');
-      card.appendChild(detailsGrid);
-
-      // Action Buttons Container
-      const btnRow = document.createElement('div');
-      btnRow.style.display = 'flex';
-      btnRow.style.gap = '10px';
-      btnRow.style.flexWrap = 'wrap';
-      btnRow.style.alignItems = 'center';
-
-      const sendResp = async (action, reason = '') => {
-        inFlight = true;
-        disableActionButtons(btnRow);
-        const r = await callBridge('unit_alert_respond', { alertId: openA.id, action, reason });
-        if (!r.ok && r.error) {
-          showInlineError(card, r.error);
-        }
-        inFlight = false;
-        await fetchState();
-      };
-
-      if (openA.state === 'Pending') {
-        const btnAccept = document.createElement('button');
-        btnAccept.textContent = 'Accept Dispatch';
-        btnAccept.style.padding = '8px 18px';
-        btnAccept.style.fontWeight = 'bold';
-        btnAccept.style.background = '#28a745';
-        btnAccept.style.color = '#ffffff';
-        btnAccept.style.border = 'none';
-        btnAccept.style.borderRadius = '3px';
-        btnAccept.style.cursor = 'pointer';
-        btnAccept.onclick = () => sendResp('accept');
-
-        const btnDecline = document.createElement('button');
-        btnDecline.textContent = 'Decline Dispatch';
-        btnDecline.style.padding = '8px 14px';
-        btnDecline.style.background = '#dc3545';
-        btnDecline.style.color = '#ffffff';
-        btnDecline.style.border = 'none';
-        btnDecline.style.borderRadius = '3px';
-        btnDecline.style.cursor = 'pointer';
-        btnDecline.onclick = () => {
-          const reason = prompt('Optional reason for declining dispatch:') || '';
-          sendResp('decline', reason);
-        };
-
-        btnRow.appendChild(btnAccept);
-        btnRow.appendChild(btnDecline);
-      } else if (openA.state === 'Accepted') {
-        if (kind === 'ambulance' || kind === 'fire_truck' || kind === 'police_unit') {
-          const btnEnRoute = document.createElement('button');
-          btnEnRoute.textContent = 'Mark En Route';
-          btnEnRoute.style.padding = '8px 16px';
-          btnEnRoute.style.fontWeight = 'bold';
-          btnEnRoute.onclick = () => sendResp('en_route');
-          btnRow.appendChild(btnEnRoute);
-        }
-        const btnClear = document.createElement('button');
-        btnClear.textContent = 'Clear Alert';
-        btnClear.style.padding = '8px 16px';
-        btnClear.onclick = () => sendResp('clear');
-        btnRow.appendChild(btnClear);
-      } else if (openA.state === 'EnRoute') {
-        const btnOnScene = document.createElement('button');
-        btnOnScene.textContent = 'Mark On Scene';
-        btnOnScene.style.padding = '8px 16px';
-        btnOnScene.style.fontWeight = 'bold';
-        btnOnScene.onclick = () => sendResp('on_scene');
-        btnRow.appendChild(btnOnScene);
-
-        const btnClear = document.createElement('button');
-        btnClear.textContent = 'Clear Alert';
-        btnClear.style.padding = '8px 16px';
-        btnClear.onclick = () => sendResp('clear');
-        btnRow.appendChild(btnClear);
-      } else if (openA.state === 'OnScene') {
-        if (kind === 'ambulance') {
-          const btnTrans = document.createElement('button');
-          btnTrans.textContent = 'Transporting Patient';
-          btnTrans.style.padding = '8px 16px';
-          btnTrans.style.fontWeight = 'bold';
-          btnTrans.onclick = () => sendResp('transporting');
-          btnRow.appendChild(btnTrans);
-        }
-        const btnClear = document.createElement('button');
-        btnClear.textContent = 'Clear Alert';
-        btnClear.style.padding = '8px 16px';
-        btnClear.onclick = () => sendResp('clear');
-        btnRow.appendChild(btnClear);
-      } else if (openA.state === 'Transporting') {
-        const btnClear = document.createElement('button');
-        btnClear.textContent = 'Clear Alert';
-        btnClear.style.padding = '8px 16px';
-        btnClear.onclick = () => sendResp('clear');
-        btnRow.appendChild(btnClear);
-      }
-
-      card.appendChild(btnRow);
-      container.appendChild(card);
+      historySlot = document.createElement('div');
+      historySlot.id = 'unit-history-slot';
+      container.appendChild(historySlot);
     }
 
-    // Historical 5 Closed Alerts Table
-    const histBox = document.createElement('div');
-    histBox.style.marginTop = '25px';
+    const openA = unitState.openAlert;
+    const prof = unitState.profile || {};
+    const kind = prof.kind || '';
+
+    if (!openA) {
+      if (currentAlertMap || currentAlertId !== null) {
+        cleanupAlertMap();
+      }
+      renderNoAlertBox(alertSlot);
+    } else {
+      if (currentAlertId !== openA.id || !document.getElementById('unit-active-alert-card')) {
+        cleanupAlertMap();
+        currentAlertId = openA.id;
+        renderNewAlertCard(alertSlot, openA, kind);
+      } else {
+        updateExistingAlertCard(openA, kind);
+      }
+    }
+
+    renderHistoryTable(historySlot);
+  }
+
+  function renderNoAlertBox(slot) {
+    if (slot.querySelector('#unit-no-alert-box')) return;
+    slot.textContent = '';
+
+    const noBox = document.createElement('div');
+    noBox.id = 'unit-no-alert-box';
+    noBox.style.padding = '25px';
+    noBox.style.textAlign = 'center';
+    noBox.style.background = '#f0f9ff';
+    noBox.style.border = '1px solid #b8daff';
+    noBox.style.borderRadius = '4px';
+    noBox.style.marginBottom = '20px';
+
+    const noH3 = document.createElement('h3');
+    noH3.style.color = '#004085';
+    noH3.style.margin = '0 0 5px 0';
+    noH3.textContent = 'No Active Dispatch Alert';
+    noBox.appendChild(noH3);
+
+    const noP = document.createElement('p');
+    noP.style.margin = '0';
+    noP.style.color = '#555';
+    noP.textContent = 'Unit is on standby. Incoming dispatches will sound an audible alarm and appear here.';
+    noBox.appendChild(noP);
+    slot.appendChild(noBox);
+  }
+
+  function renderNewAlertCard(slot, openA, kind) {
+    slot.textContent = '';
+
+    const card = document.createElement('div');
+    card.id = 'unit-active-alert-card';
+    card.style.padding = '20px';
+    card.style.border = '2px solid #d9534f';
+    card.style.borderRadius = '6px';
+    card.style.background = (openA.state === 'Pending') ? '#fff3cd' : '#ffffff';
+    card.style.boxShadow = '0 2px 6px rgba(0,0,0,0.1)';
+    card.style.marginBottom = '25px';
+
+    const cardHead = document.createElement('div');
+    cardHead.style.display = 'flex';
+    cardHead.style.justifyContent = 'space-between';
+    cardHead.style.alignItems = 'center';
+    cardHead.style.marginBottom = '12px';
+
+    const cTitle = document.createElement('h3');
+    cTitle.id = 'unit-alert-title';
+    cTitle.style.margin = '0';
+    cTitle.style.color = '#a71d2a';
+    cTitle.textContent = `Active Dispatch Alert #${openA.id} [${openA.state}]`;
+    cardHead.appendChild(cTitle);
+
+    const timerSpan = document.createElement('span');
+    timerSpan.id = 'unit-alert-timer';
+    timerSpan.style.fontWeight = 'bold';
+    timerSpan.style.fontSize = '14px';
+    updateTimerSpan(timerSpan, openA);
+    cardHead.appendChild(timerSpan);
+    card.appendChild(cardHead);
+
+    const detailsGrid = document.createElement('div');
+    detailsGrid.id = 'unit-alert-details-grid';
+    detailsGrid.style.display = 'grid';
+    detailsGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(200px, 1fr))';
+    detailsGrid.style.gap = '10px';
+    detailsGrid.style.marginBottom = '15px';
+
+    const addField = (lbl, val, fieldId = '') => {
+      const p = document.createElement('p');
+      p.style.margin = '0';
+      if (fieldId) p.id = fieldId;
+      const st = document.createElement('strong');
+      st.textContent = lbl + ': ';
+      p.appendChild(st);
+      const sp = document.createElement('span');
+      sp.className = 'field-val';
+      sp.textContent = val !== undefined && val !== null ? val : 'N/A';
+      p.appendChild(sp);
+      detailsGrid.appendChild(p);
+    };
+
+    const incidentIdVal = (openA.incidentId !== undefined && openA.incidentId !== null)
+      ? openA.incidentId
+      : openA.id;
+    const incText = (incidentIdVal !== undefined && incidentIdVal !== null)
+      ? ("Incident #" + incidentIdVal)
+      : 'N/A';
+    addField('Incident ID', incText, 'field-incident-id');
+
+    const roleVal = openA.role || openA.assignmentRole || 'primary';
+    addField('Role', roleVal, 'field-role');
+
+    let distStr = 'N/A';
+    if (openA.distanceMeters !== undefined && openA.distanceMeters !== null) {
+      distStr = (Number(openA.distanceMeters) / 1000).toFixed(2) + " km";
+    } else if (openA.distance !== undefined && openA.distance !== null) {
+      distStr = typeof openA.distance === 'number'
+        ? (openA.distance / 1000).toFixed(2) + " km"
+        : String(openA.distance);
+    }
+    addField('Distance', distStr, 'field-distance');
+
+    addField('Emergency Type', openA.type, 'field-emergency-type');
+    addField('Severity Level', `${openA.severity} / 5`, 'field-severity');
+
+    const isHospOrShelter = (
+      kind === 'hospital' ||
+      kind === 'shelter' ||
+      openA.kind === 'hospital' ||
+      openA.kind === 'shelter' ||
+      openA.role === 'hospital' ||
+      openA.role === 'shelter' ||
+      openA.assignmentRole === 'hospital' ||
+      openA.assignmentRole === 'shelter'
+    );
+    const peopleCount = (openA.peopleAffected !== undefined && openA.peopleAffected !== null)
+      ? openA.peopleAffected
+      : ((openA.people !== undefined && openA.people !== null)
+        ? openA.people
+        : (openA.peopleCount !== undefined ? openA.peopleCount : 'N/A'));
+
+    if (isHospOrShelter) {
+      addField('Incoming patients/people', peopleCount, 'field-people');
+    } else {
+      addField('People Affected', peopleCount, 'field-people');
+    }
+
+    addField('Location', openA.locationText, 'field-location');
+    if (openA.lat !== undefined && openA.lon !== undefined && openA.lat !== null && openA.lon !== null) {
+      addField('Coordinates', `${Number(openA.lat).toFixed(5)}, ${Number(openA.lon).toFixed(5)}`, 'field-coords');
+    }
+    addField('Dispatcher Note', openA.note || 'None', 'field-note');
+
+    card.appendChild(detailsGrid);
+
+    const mapDiv = document.createElement('div');
+    mapDiv.id = 'unit-alert-map';
+    mapDiv.style.height = '200px';
+    mapDiv.style.width = '100%';
+    mapDiv.style.marginTop = '10px';
+    mapDiv.style.marginBottom = '15px';
+    mapDiv.style.borderRadius = '4px';
+    mapDiv.style.border = '1px solid #ccc';
+    mapDiv.style.background = '#f0f0f0';
+    card.appendChild(mapDiv);
+
+    const btnRow = document.createElement('div');
+    btnRow.id = 'unit-alert-buttons';
+    btnRow.style.display = 'flex';
+    btnRow.style.gap = '10px';
+    btnRow.style.flexWrap = 'wrap';
+    btnRow.style.alignItems = 'center';
+    card.appendChild(btnRow);
+
+    slot.appendChild(card);
+
+    initAlertMap(mapDiv, openA);
+    renderActionButtons(btnRow, card, openA, kind);
+    currentCardRenderedState = openA.state;
+  }
+
+  function initAlertMap(mapDiv, openA) {
+    if (typeof L === 'undefined' || !L.map) return;
+
+    try {
+      const alertMap = L.map(mapDiv, { preferCanvas: true });
+
+      let tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
+      const key = (typeof localStorage !== 'undefined') ? (localStorage.getItem('rapidaid_carto_api_key') || '') : '';
+      if (key) {
+        tileUrl += `?key=${encodeURIComponent(key)}`;
+      }
+      L.tileLayer(tileUrl, {
+        maxZoom: 19,
+        subdomains: 'abcd',
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      }).addTo(alertMap);
+
+      const layersToFit = [];
+
+      currentPolyline = null;
+      if (Array.isArray(openA.routeCoordinates) && openA.routeCoordinates.length > 0) {
+        const latLngs = openA.routeCoordinates.map(pt => {
+          if (Array.isArray(pt)) {
+            return [Number(pt[1]), Number(pt[0])];
+          } else if (pt && typeof pt === 'object') {
+            return [Number(pt.lat), Number(pt.lon)];
+          }
+          return pt;
+        }).filter(coord => Array.isArray(coord) && !isNaN(coord[0]) && !isNaN(coord[1]));
+
+        if (latLngs.length > 0) {
+          currentPolyline = L.polyline(latLngs, { color: '#0066cc', weight: 4 }).addTo(alertMap);
+          layersToFit.push(currentPolyline);
+        }
+      }
+
+      currentIncidentMarker = null;
+      let incLat = (openA.lat !== undefined && openA.lat !== null) ? Number(openA.lat) : null;
+      let incLon = (openA.lon !== undefined && openA.lon !== null) ? Number(openA.lon) : null;
+
+      if ((incLat === null || isNaN(incLat)) && Array.isArray(openA.routeCoordinates) && openA.routeCoordinates.length > 0) {
+        const lastPt = openA.routeCoordinates[openA.routeCoordinates.length - 1];
+        if (Array.isArray(lastPt)) {
+          incLon = Number(lastPt[0]);
+          incLat = Number(lastPt[1]);
+        } else if (lastPt && typeof lastPt === 'object') {
+          incLat = Number(lastPt.lat);
+          incLon = Number(lastPt.lon);
+        }
+      }
+
+      if (incLat !== null && !isNaN(incLat) && incLon !== null && !isNaN(incLon)) {
+        currentIncidentMarker = L.marker([incLat, incLon]).addTo(alertMap);
+        const popupDiv = document.createElement('div');
+        const b = document.createElement('strong');
+        b.textContent = 'Incident Location';
+        popupDiv.appendChild(b);
+        if (openA.locationText) {
+          popupDiv.appendChild(document.createElement('br'));
+          const locSpan = document.createElement('span');
+          locSpan.textContent = openA.locationText;
+          popupDiv.appendChild(locSpan);
+        }
+        currentIncidentMarker.bindPopup(popupDiv);
+        layersToFit.push(currentIncidentMarker);
+      }
+
+      if (layersToFit.length > 0) {
+        const group = L.featureGroup(layersToFit);
+        const bounds = group.getBounds();
+        if (bounds.isValid()) {
+          if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
+            alertMap.setView(bounds.getNorthEast(), 14);
+          } else {
+            alertMap.fitBounds(bounds.pad(0.1));
+          }
+        }
+      } else {
+        const prof = (unitState && unitState.profile) ? unitState.profile : {};
+        const uLat = prof.lat !== undefined ? Number(prof.lat) : 48.8583;
+        const uLon = prof.lon !== undefined ? Number(prof.lon) : 2.2945;
+        alertMap.setView([uLat, uLon], 14);
+      }
+
+      setTimeout(() => {
+        try {
+          alertMap.invalidateSize();
+        } catch (e) {}
+      }, 150);
+
+      currentAlertMap = alertMap;
+    } catch (err) {
+      console.error('Error initializing Leaflet alert map:', err);
+    }
+  }
+
+  function updateExistingAlertCard(openA, kind) {
+    const card = document.getElementById('unit-active-alert-card');
+    if (!card) return;
+
+    card.style.background = (openA.state === 'Pending') ? '#fff3cd' : '#ffffff';
+
+    const cTitle = document.getElementById('unit-alert-title');
+    if (cTitle) {
+      cTitle.textContent = `Active Dispatch Alert #${openA.id} [${openA.state}]`;
+    }
+
+    const timerSpan = document.getElementById('unit-alert-timer');
+    if (timerSpan) {
+      updateTimerSpan(timerSpan, openA);
+    }
+
+    const distField = document.getElementById('field-distance');
+    if (distField) {
+      let distStr = 'N/A';
+      if (openA.distanceMeters !== undefined && openA.distanceMeters !== null) {
+        distStr = (Number(openA.distanceMeters) / 1000).toFixed(2) + " km";
+      } else if (openA.distance !== undefined && openA.distance !== null) {
+        distStr = typeof openA.distance === 'number'
+          ? (openA.distance / 1000).toFixed(2) + " km"
+          : String(openA.distance);
+      }
+      const valSpan = distField.querySelector('.field-val');
+      if (valSpan) valSpan.textContent = distStr;
+    }
+
+    const peopleField = document.getElementById('field-people');
+    if (peopleField) {
+      const peopleCount = (openA.peopleAffected !== undefined && openA.peopleAffected !== null)
+        ? openA.peopleAffected
+        : ((openA.people !== undefined && openA.people !== null)
+          ? openA.people
+          : (openA.peopleCount !== undefined ? openA.peopleCount : 'N/A'));
+      const valSpan = peopleField.querySelector('.field-val');
+      if (valSpan) valSpan.textContent = peopleCount;
+    }
+
+    if (currentCardRenderedState !== openA.state) {
+      const btnRow = document.getElementById('unit-alert-buttons');
+      if (btnRow) {
+        btnRow.textContent = '';
+        renderActionButtons(btnRow, card, openA, kind);
+      }
+      currentCardRenderedState = openA.state;
+    }
+  }
+
+  function updateTimerSpan(timerSpan, openA) {
+    if (openA.state === 'Pending') {
+      const secs = openA.secondsLeft !== undefined ? openA.secondsLeft : 60;
+      if (secs <= 0) {
+        timerSpan.textContent = 'Acknowledge: OVERDUE (0s)';
+        timerSpan.style.color = '#dc3545';
+      } else {
+        timerSpan.textContent = `Acknowledge in: ${secs}s`;
+        timerSpan.style.color = '#d39e00';
+      }
+    } else {
+      timerSpan.textContent = `State: ${openA.state}`;
+      timerSpan.style.color = '#28a745';
+    }
+  }
+
+  function renderActionButtons(btnRow, card, openA, kind) {
+    const sendResp = async (action, reason = '') => {
+      inFlight = true;
+      disableActionButtons(btnRow);
+      const r = await callBridge('unit_alert_respond', { alertId: openA.id, action, reason });
+      if (!r.ok && r.error) {
+        showInlineError(card, r.error);
+      }
+      inFlight = false;
+      await fetchState();
+    };
+
+    if (openA.state === 'Pending') {
+      const btnAccept = document.createElement('button');
+      btnAccept.textContent = 'Accept Dispatch';
+      btnAccept.style.padding = '8px 18px';
+      btnAccept.style.fontWeight = 'bold';
+      btnAccept.style.background = '#28a745';
+      btnAccept.style.color = '#ffffff';
+      btnAccept.style.border = 'none';
+      btnAccept.style.borderRadius = '3px';
+      btnAccept.style.cursor = 'pointer';
+      btnAccept.onclick = () => sendResp('accept');
+
+      const btnDecline = document.createElement('button');
+      btnDecline.textContent = 'Decline Dispatch';
+      btnDecline.style.padding = '8px 14px';
+      btnDecline.style.background = '#dc3545';
+      btnDecline.style.color = '#ffffff';
+      btnDecline.style.border = 'none';
+      btnDecline.style.borderRadius = '3px';
+      btnDecline.style.cursor = 'pointer';
+      btnDecline.onclick = () => {
+        const reason = prompt('Optional reason for declining dispatch:') || '';
+        sendResp('decline', reason);
+      };
+
+      btnRow.appendChild(btnAccept);
+      btnRow.appendChild(btnDecline);
+    } else if (openA.state === 'Accepted') {
+      if (kind === 'ambulance' || kind === 'fire_truck' || kind === 'police_unit') {
+        const btnEnRoute = document.createElement('button');
+        btnEnRoute.textContent = 'Mark En Route';
+        btnEnRoute.style.padding = '8px 16px';
+        btnEnRoute.style.fontWeight = 'bold';
+        btnEnRoute.onclick = () => sendResp('en_route');
+        btnRow.appendChild(btnEnRoute);
+      }
+      const btnClear = document.createElement('button');
+      btnClear.textContent = 'Clear Alert';
+      btnClear.style.padding = '8px 16px';
+      btnClear.onclick = () => sendResp('clear');
+      btnRow.appendChild(btnClear);
+    } else if (openA.state === 'EnRoute') {
+      const btnOnScene = document.createElement('button');
+      btnOnScene.textContent = 'Mark On Scene';
+      btnOnScene.style.padding = '8px 16px';
+      btnOnScene.style.fontWeight = 'bold';
+      btnOnScene.onclick = () => sendResp('on_scene');
+      btnRow.appendChild(btnOnScene);
+
+      const btnClear = document.createElement('button');
+      btnClear.textContent = 'Clear Alert';
+      btnClear.style.padding = '8px 16px';
+      btnClear.onclick = () => sendResp('clear');
+      btnRow.appendChild(btnClear);
+    } else if (openA.state === 'OnScene') {
+      if (kind === 'ambulance') {
+        const btnTrans = document.createElement('button');
+        btnTrans.textContent = 'Transporting Patient';
+        btnTrans.style.padding = '8px 16px';
+        btnTrans.style.fontWeight = 'bold';
+        btnTrans.onclick = () => sendResp('transporting');
+        btnRow.appendChild(btnTrans);
+      }
+      const btnClear = document.createElement('button');
+      btnClear.textContent = 'Clear Alert';
+      btnClear.style.padding = '8px 16px';
+      btnClear.onclick = () => sendResp('clear');
+      btnRow.appendChild(btnClear);
+    } else if (openA.state === 'Transporting') {
+      const btnClear = document.createElement('button');
+      btnClear.textContent = 'Clear Alert';
+      btnClear.style.padding = '8px 16px';
+      btnClear.onclick = () => sendResp('clear');
+      btnRow.appendChild(btnClear);
+    }
+  }
+
+  function renderHistoryTable(slot) {
+    slot.textContent = '';
+    slot.style.marginTop = '25px';
 
     const h4 = document.createElement('h4');
     h4.textContent = 'Recent Closed Dispatches (Last 5)';
-    histBox.appendChild(h4);
+    slot.appendChild(h4);
 
-    const recents = unitState.recentAlerts || [];
+    const recents = (unitState && unitState.recentAlerts) ? unitState.recentAlerts : [];
     if (recents.length === 0) {
       const p = document.createElement('p');
       p.style.color = '#777';
       p.textContent = 'No past closed alerts.';
-      histBox.appendChild(p);
+      slot.appendChild(p);
     } else {
       const table = document.createElement('table');
       table.style.width = '100%';
@@ -843,7 +1131,16 @@ window.RapidAidUnit = (function() {
       table.style.fontSize = '13px';
 
       const thead = document.createElement('thead');
-      thead.innerHTML = '<tr style="border-bottom: 2px solid #ccc; text-align: left;"><th style="padding: 6px;">ID</th><th style="padding: 6px;">Type</th><th style="padding: 6px;">Severity</th><th style="padding: 6px;">Location</th><th style="padding: 6px;">Final State</th><th style="padding: 6px;">Reason</th></tr>';
+      const trHead = document.createElement('tr');
+      trHead.style.borderBottom = '2px solid #ccc';
+      trHead.style.textAlign = 'left';
+      ['ID', 'Type', 'Severity', 'Location', 'Final State', 'Reason'].forEach(txt => {
+        const th = document.createElement('th');
+        th.style.padding = '6px';
+        th.textContent = txt;
+        trHead.appendChild(th);
+      });
+      thead.appendChild(trHead);
       table.appendChild(thead);
 
       const tbody = document.createElement('tbody');
@@ -867,10 +1164,8 @@ window.RapidAidUnit = (function() {
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
-      histBox.appendChild(table);
+      slot.appendChild(table);
     }
-
-    container.appendChild(histBox);
   }
 
   function disableActionButtons(container) {

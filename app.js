@@ -1,11 +1,11 @@
 /**
  * RapidAid Frontend Dispatcher Application (app.js)
  * Features:
- * - Real backend authentication & session persistence (token via sessionStorage)
+ * - Real backend authentication & session persistence (sessionStorage)
  * - Role-based UI routing (Dispatcher / Admin vs Service Unit)
- * - Live OpenStreetMap Geocoding (Photon & Nominatim fallback)
- * - Live Leaflet Map Integration with real OSM street tiles & CARTO
- * - GeoJSON Generation and Pipeline Trigger with authenticated tokens
+ * - Bridge-based OSM Geocoding & Area Pipeline
+ * - Shared Leaflet Map Engine for Area & Incident Board
+ * - Modular Loader for RapidAidBoard and RapidAidDispatch
  * - Dispatcher Developer Test Alert panel & 3s live alert polling
  * Strict textContent usage for all dynamic text to prevent XSS.
  */
@@ -17,19 +17,25 @@ const state = {
   hasGeoJson: false,
   centerLat: 48.8583,
   centerLon: 2.2945,
+  centerDisplayName: 'Eiffel Tower, Paris',
+  lastGeocodedName: '',
   radiusMeters: 3000,
   cartoApiKey: '',
-  tileLayer: null,
-  leafletMap: null,
+  areaTileLayer: null,
+  boardTileLayer: null,
+  leafletMap: null, // Area map (#leaflet-map)
+  boardMap: null,   // Shared Incident Board map (#board-map)
   centerMarker: null,
   radiusCircle: null,
-  roadsLayer: null,
-  placesLayer: null,
+  areaLayers: { roadsLayer: null, placesLayer: null },
+  boardLayers: { roadsLayer: null, placesLayer: null },
   roadsGeoJson: null,
   placesGeoJson: null
 };
 
 let dispatcherAlertsTimer = null;
+let boardRunning = false;
+let dispatchRunning = false;
 
 // ==========================================
 // API Bridge Helper
@@ -48,7 +54,165 @@ async function callBridge(action, payload = {}) {
     });
     return await res.json();
   } catch (err) {
-    return { ok: false, error: 'Network error communicating with server' };
+    return { ok: false, error: 'Network error communicating with server: ' + (err.message || err) };
+  }
+}
+
+// ==========================================
+// Public RapidAid Bridge & Module Contracts
+// ==========================================
+window.RapidAid = {
+  callBridge: async function(action, payload = {}) {
+    return await callBridge(action, payload);
+  },
+  getBoardMap: function() {
+    return ensureBoardMap();
+  },
+  reloadLayers: async function() {
+    const roadsRes = await callBridge('get_geojson', { type: 'roads' });
+    const placesRes = await callBridge('get_geojson', { type: 'places' });
+    let roads = null;
+    let places = null;
+    if (roadsRes && roadsRes.ok && roadsRes.geojson) {
+      try {
+        roads = typeof roadsRes.geojson === 'string' ? JSON.parse(roadsRes.geojson) : roadsRes.geojson;
+      } catch (e) {
+        console.error('Failed to parse roads geojson', e);
+      }
+    }
+    if (placesRes && placesRes.ok && placesRes.geojson) {
+      try {
+        places = typeof placesRes.geojson === 'string' ? JSON.parse(placesRes.geojson) : placesRes.geojson;
+      } catch (e) {
+        console.error('Failed to parse places geojson', e);
+      }
+    }
+    state.roadsGeoJson = roads;
+    state.placesGeoJson = places;
+
+    const bMap = ensureBoardMap();
+    if (bMap && (roads || places)) {
+      renderGeoJsonOnMap(bMap, roads, places, state.boardLayers);
+    }
+    if (state.leafletMap && (roads || places)) {
+      renderGeoJsonOnMap(state.leafletMap, roads, places, state.areaLayers);
+    }
+    return { ok: true, roads, places };
+  },
+  getUsername: function() {
+    return state.user || '';
+  },
+  getRole: function() {
+    return state.role || '';
+  }
+};
+
+// Global hook for unit.js
+window.RapidAidApp = {
+  showAuthView
+};
+
+// ==========================================
+// Tolerant Optional Module Loader
+// ==========================================
+function loadOptionalModules() {
+  function appendModuleScript(src) {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => {
+      if (state.activeSection === 'incidents') {
+        initActiveBoardModules();
+      }
+    };
+    s.onerror = () => {
+      // Tolerantly ignore missing module script
+    };
+    document.head.appendChild(s);
+  }
+
+  appendModuleScript('board.js');
+  appendModuleScript('dispatch.js');
+}
+
+function initActiveBoardModules() {
+  const boardMount = document.getElementById('board-mount');
+  if (boardMount) {
+    if (window.RapidAidBoard && typeof window.RapidAidBoard.init === 'function') {
+      if (!boardRunning) {
+        boardMount.textContent = '';
+        boardMount.style.padding = '';
+        boardMount.style.color = '';
+        boardMount.style.fontStyle = '';
+        try {
+          window.RapidAidBoard.init(boardMount);
+          boardRunning = true;
+        } catch (err) {
+          console.error('Error initializing RapidAidBoard:', err);
+        }
+      }
+    } else {
+      boardMount.textContent = 'Incident board module not installed';
+      boardMount.style.padding = '12px';
+      boardMount.style.color = '#777';
+      boardMount.style.fontStyle = 'italic';
+      boardRunning = false;
+    }
+  }
+
+  const dispatchMount = document.getElementById('dispatch-mount');
+  if (dispatchMount) {
+    if (window.RapidAidDispatch && typeof window.RapidAidDispatch.init === 'function') {
+      if (!dispatchRunning) {
+        dispatchMount.textContent = '';
+        dispatchMount.style.padding = '';
+        dispatchMount.style.color = '';
+        dispatchMount.style.fontStyle = '';
+        try {
+          window.RapidAidDispatch.init(dispatchMount);
+          dispatchRunning = true;
+        } catch (err) {
+          console.error('Error initializing RapidAidDispatch:', err);
+        }
+      }
+    } else {
+      dispatchMount.textContent = 'Dispatch panel not installed';
+      dispatchMount.style.padding = '12px';
+      dispatchMount.style.color = '#777';
+      dispatchMount.style.fontStyle = 'italic';
+      dispatchRunning = false;
+    }
+  }
+}
+
+function startBoardModules() {
+  const bMap = window.RapidAid.getBoardMap();
+  if (bMap) {
+    setTimeout(() => bMap.invalidateSize(), 150);
+  }
+  initActiveBoardModules();
+}
+
+function stopBoardModules() {
+  if (boardRunning) {
+    if (window.RapidAidBoard && typeof window.RapidAidBoard.stop === 'function') {
+      try {
+        window.RapidAidBoard.stop();
+      } catch (err) {
+        console.error('Error stopping RapidAidBoard:', err);
+      }
+    }
+    boardRunning = false;
+  }
+  if (dispatchRunning) {
+    if (window.RapidAidDispatch && typeof window.RapidAidDispatch.stop === 'function') {
+      try {
+        window.RapidAidDispatch.stop();
+      } catch (err) {
+        console.error('Error stopping RapidAidDispatch:', err);
+      }
+    }
+    dispatchRunning = false;
   }
 }
 
@@ -63,6 +227,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initApiKeyEvents();
   initDispatcherAlertTest();
   checkApiKey();
+  loadOptionalModules();
   updateStatusBanner('Ready');
 
   // Session check on page load (A2)
@@ -187,7 +352,7 @@ function initApiKeyEvents() {
         feedback.style.color = '#28a745';
       }
 
-      updateTileLayer();
+      updateTileLayers();
 
       setTimeout(() => {
         if (banner) banner.style.display = 'none';
@@ -220,14 +385,12 @@ function initApiKeyEvents() {
   }
 }
 
-// ==========================================
-// 3. Leaflet Map Engine
-// ==========================================
-function updateTileLayer() {
-  if (!state.leafletMap) return;
+function applyTileLayer(mapInstance, tileLayerKey) {
+  if (!mapInstance) return;
 
-  if (state.tileLayer) {
-    state.leafletMap.removeLayer(state.tileLayer);
+  if (state[tileLayerKey]) {
+    mapInstance.removeLayer(state[tileLayerKey]);
+    state[tileLayerKey] = null;
   }
 
   let tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
@@ -235,45 +398,144 @@ function updateTileLayer() {
     tileUrl += `?key=${encodeURIComponent(state.cartoApiKey)}`;
   }
 
-  state.tileLayer = L.tileLayer(tileUrl, {
+  state[tileLayerKey] = L.tileLayer(tileUrl, {
     maxZoom: 19,
     subdomains: 'abcd',
     attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
-  }).addTo(state.leafletMap);
+  }).addTo(mapInstance);
 }
 
-function getPipelineGeoJson() {
-  if (window.RAPIDAID_ROADS && window.RAPIDAID_PLACES) {
-    return {
-      roads: window.RAPIDAID_ROADS,
-      places: window.RAPIDAID_PLACES
-    };
+function updateTileLayers() {
+  if (state.leafletMap) {
+    applyTileLayer(state.leafletMap, 'areaTileLayer');
   }
-  return null;
+  if (state.boardMap) {
+    applyTileLayer(state.boardMap, 'boardTileLayer');
+  }
+}
+
+// ==========================================
+// 3. Leaflet Map Engine
+// ==========================================
+function formatAmenityName(cat) {
+  if (cat === 'hospital') return 'Hospital';
+  if (cat === 'fire_station') return 'Fire Station';
+  if (cat === 'police') return 'Police Station';
+  if (cat === 'clinic') return 'Clinic';
+  if (cat === 'pharmacy') return 'Pharmacy';
+  if (cat === 'shelter') return 'Emergency Shelter';
+  return cat || 'Facility';
+}
+
+function renderGeoJsonOnMap(mapInstance, roadsGeoJson, placesGeoJson, layerHolder) {
+  if (!mapInstance) return;
+
+  if (layerHolder.roadsLayer) {
+    mapInstance.removeLayer(layerHolder.roadsLayer);
+    layerHolder.roadsLayer = null;
+  }
+  if (layerHolder.placesLayer) {
+    mapInstance.removeLayer(layerHolder.placesLayer);
+    layerHolder.placesLayer = null;
+  }
+
+  if (roadsGeoJson && roadsGeoJson.features && roadsGeoJson.features.length > 0) {
+    layerHolder.roadsLayer = L.geoJSON(roadsGeoJson, {
+      style: { color: '#0066cc', weight: 3.5, opacity: 0.85 }
+    }).addTo(mapInstance);
+  }
+
+  const categoryColors = {
+    hospital: '#e74c3c',
+    clinic: '#27ae60',
+    pharmacy: '#9b59b6',
+    fire_station: '#e67e22',
+    police: '#2980b9',
+    shelter: '#16a085'
+  };
+
+  if (placesGeoJson && placesGeoJson.features && placesGeoJson.features.length > 0) {
+    layerHolder.placesLayer = L.geoJSON(placesGeoJson, {
+      pointToLayer: (feature, latlng) => {
+        const cat = (feature.properties && feature.properties.category) ? feature.properties.category : 'hospital';
+        const markerColor = categoryColors[cat] || '#28a745';
+        return L.circleMarker(latlng, {
+          radius: 8,
+          fillColor: markerColor,
+          color: '#ffffff',
+          weight: 2,
+          opacity: 1,
+          fillOpacity: 0.95
+        });
+      },
+      onEachFeature: (feature, layer) => {
+        const name = (feature.properties && feature.properties.name) ? feature.properties.name : 'Facility';
+        const cat = (feature.properties && feature.properties.category) ? feature.properties.category : 'facility';
+        const container = document.createElement('div');
+        const b = document.createElement('b');
+        b.textContent = name;
+        container.appendChild(b);
+        container.appendChild(document.createElement('br'));
+        const span = document.createElement('span');
+        span.textContent = 'Category: ' + formatAmenityName(cat);
+        container.appendChild(span);
+        layer.bindPopup(container);
+      }
+    }).addTo(mapInstance);
+  }
+
+  try {
+    const group = new L.featureGroup([layerHolder.roadsLayer, layerHolder.placesLayer].filter(Boolean));
+    if (group.getLayers().length > 0) {
+      mapInstance.fitBounds(group.getBounds().pad(0.1));
+    }
+  } catch (e) {}
 }
 
 function ensureLeafletMap() {
+  const container = document.getElementById('leaflet-map');
+  if (!container) return;
+
   if (state.leafletMap) {
     setTimeout(() => state.leafletMap.invalidateSize(), 150);
     return;
   }
 
-  const container = document.getElementById('leaflet-map');
-  if (!container) return;
-
   state.leafletMap = L.map('leaflet-map', { preferCanvas: true }).setView([state.centerLat, state.centerLon], 14);
-  updateTileLayer();
+  applyTileLayer(state.leafletMap, 'areaTileLayer');
 
-  updateMapVisuals('Eiffel Tower, Paris', state.centerLat, state.centerLon, state.radiusMeters);
+  updateMapVisuals(state.centerDisplayName, state.centerLat, state.centerLon, state.radiusMeters);
 
-  const pData = getPipelineGeoJson();
-  if (pData) {
-    state.roadsGeoJson = pData.roads;
-    state.placesGeoJson = pData.places;
-    renderGeoJsonOnLeaflet(pData.roads, pData.places);
+  if (state.roadsGeoJson || state.placesGeoJson) {
+    renderGeoJsonOnMap(state.leafletMap, state.roadsGeoJson, state.placesGeoJson, state.areaLayers);
   }
 
   setTimeout(() => state.leafletMap.invalidateSize(), 200);
+}
+
+function ensureBoardMap() {
+  const container = document.getElementById('board-map');
+  if (!container) return null;
+
+  if (state.boardMap) {
+    setTimeout(() => {
+      if (state.boardMap) state.boardMap.invalidateSize();
+    }, 100);
+    return state.boardMap;
+  }
+
+  state.boardMap = L.map('board-map', { preferCanvas: true }).setView([state.centerLat, state.centerLon], 14);
+  applyTileLayer(state.boardMap, 'boardTileLayer');
+
+  if (state.roadsGeoJson || state.placesGeoJson) {
+    renderGeoJsonOnMap(state.boardMap, state.roadsGeoJson, state.placesGeoJson, state.boardLayers);
+  }
+
+  setTimeout(() => {
+    if (state.boardMap) state.boardMap.invalidateSize();
+  }, 150);
+
+  return state.boardMap;
 }
 
 function updateMapVisuals(displayName, lat, lon, radiusMeters) {
@@ -282,12 +544,22 @@ function updateMapVisuals(displayName, lat, lon, radiusMeters) {
   state.centerLat = lat;
   state.centerLon = lon;
   state.radiusMeters = radiusMeters;
+  state.centerDisplayName = displayName;
 
   if (state.centerMarker) {
     state.leafletMap.removeLayer(state.centerMarker);
   }
   state.centerMarker = L.marker([lat, lon]).addTo(state.leafletMap);
-  state.centerMarker.bindPopup(`<b>${displayName}</b><br>Coordinates: ${lat.toFixed(5)}, ${lon.toFixed(5)}`).openPopup();
+
+  const popupDiv = document.createElement('div');
+  const b = document.createElement('b');
+  b.textContent = displayName;
+  popupDiv.appendChild(b);
+  popupDiv.appendChild(document.createElement('br'));
+  const cSpan = document.createElement('span');
+  cSpan.textContent = `Coordinates: ${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  popupDiv.appendChild(cSpan);
+  state.centerMarker.bindPopup(popupDiv).openPopup();
 
   if (state.radiusCircle) {
     state.leafletMap.removeLayer(state.radiusCircle);
@@ -310,48 +582,8 @@ function updateMapVisuals(displayName, lat, lon, radiusMeters) {
 }
 
 // ==========================================
-// 4. Geocoding & Area Pipeline
+// 4. Area Setup Events (Real Bridge Pipeline)
 // ==========================================
-async function fetchLiveGeocode(query) {
-  // Bridge backend geocoder first (if cache/token available)
-  const bRes = await callBridge('geocode', { query });
-  if (bRes && bRes.ok) {
-    return { lat: bRes.lat, lon: bRes.lon, displayName: bRes.displayName };
-  }
-
-  try {
-    const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=1`;
-    const res = await fetch(photonUrl);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.features && data.features.length > 0) {
-        const feat = data.features[0];
-        const [lon, lat] = feat.geometry.coordinates;
-        const name = feat.properties.name || feat.properties.city || query;
-        const country = feat.properties.country || '';
-        const displayName = country ? `${name}, ${country}` : name;
-        return { lat, lon, displayName };
-      }
-    }
-  } catch (err) {}
-
-  return {
-    lat: 48.8583,
-    lon: 2.2945,
-    displayName: `${query} (Default Grid Reference)`
-  };
-}
-
-function formatAmenityName(cat) {
-  if (cat === 'hospital') return 'Hospital';
-  if (cat === 'fire_station') return 'Fire Station';
-  if (cat === 'police') return 'Police Station';
-  if (cat === 'clinic') return 'Clinic';
-  if (cat === 'pharmacy') return 'Pharmacy';
-  if (cat === 'shelter') return 'Emergency Shelter';
-  return cat || 'Facility';
-}
-
 function initAreaEvents() {
   const btnPreview = document.getElementById('btn-preview');
   const btnGenerate = document.getElementById('btn-generate');
@@ -373,23 +605,26 @@ function initAreaEvents() {
 
       ensureLeafletMap();
 
-      const loc = await fetchLiveGeocode(name);
+      const loc = await callBridge('geocode', { query: name });
+      if (!loc || !loc.ok) {
+        feedback.textContent = (loc && loc.error) ? loc.error : 'Location not found for: ' + name;
+        feedback.style.color = '#d9534f';
+        return;
+      }
+
+      state.centerLat = loc.lat;
+      state.centerLon = loc.lon;
+      state.centerDisplayName = loc.displayName || name;
+      state.lastGeocodedName = name;
+      state.radiusMeters = radius;
+
       document.getElementById('preview-coords').textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`;
       document.getElementById('preview-displayname').textContent = loc.displayName;
 
       updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
 
-      const pipelineData = getPipelineGeoJson();
-      if (pipelineData) {
-        state.roadsGeoJson = pipelineData.roads;
-        state.placesGeoJson = pipelineData.places;
-        renderGeoJsonOnLeaflet(pipelineData.roads, pipelineData.places);
-        feedback.textContent = `Location preview updated with pipeline network.`;
-        feedback.style.color = '#28a745';
-      } else {
-        feedback.textContent = 'Location geocoded! Center marker and radius circle updated.';
-        feedback.style.color = '#28a745';
-      }
+      feedback.textContent = 'Location geocoded! Center marker and radius circle updated.';
+      feedback.style.color = '#28a745';
     });
   }
 
@@ -409,109 +644,81 @@ function initAreaEvents() {
 
       ensureLeafletMap();
 
-      const loc = await fetchLiveGeocode(name);
-      updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
+      let lat = state.centerLat;
+      let lon = state.centerLon;
+      let displayName = state.centerDisplayName || name;
 
-      // Authenticated pipeline request to /api/create_area (B2)
-      try {
-        const res = await fetch('/api/create_area', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token: getToken(),
-            name,
-            radius,
-            lat: loc.lat,
-            lon: loc.lon,
-            displayName: loc.displayName
-          })
-        });
-        const pipeData = await res.json();
-
-        if (pipeData && pipeData.ok) {
-          state.hasGeoJson = true;
-          if (pipeData.roadsGeoJson && pipeData.placesGeoJson) {
-            state.roadsGeoJson = JSON.parse(pipeData.roadsGeoJson);
-            state.placesGeoJson = JSON.parse(pipeData.placesGeoJson);
-            renderGeoJsonOnLeaflet(state.roadsGeoJson, state.placesGeoJson);
-          }
-
-          document.getElementById('area-stats-box').style.display = 'block';
-          document.getElementById('stat-nodes').textContent = pipeData.nodesCount || 0;
-          document.getElementById('stat-edges').textContent = pipeData.edgesCount || 0;
-          document.getElementById('stat-places').textContent = pipeData.placesCount || 0;
-          document.getElementById('stat-snapped').textContent = pipeData.snappedCount || 0;
-
-          feedback.textContent = `Success! Operational zone pipeline completed.\n${pipeData.placesCount} facilities snapped to ${pipeData.edgesCount} road edges.`;
-          feedback.style.color = '#28a745';
-
-          document.getElementById('area-alert').style.display = 'none';
-          localStorage.setItem('rapidaid_has_geojson', 'true');
-        } else {
-          feedback.textContent = (pipeData && pipeData.error) ? pipeData.error : 'Pipeline generation failed.';
+      if (state.lastGeocodedName !== name) {
+        const loc = await callBridge('geocode', { query: name });
+        if (!loc || !loc.ok) {
+          feedback.textContent = (loc && loc.error) ? loc.error : 'Location not found for: ' + name;
           feedback.style.color = '#d9534f';
+          return;
         }
-      } catch (err) {
-        feedback.textContent = 'Network error contacting pipeline server.';
+        lat = loc.lat;
+        lon = loc.lon;
+        displayName = loc.displayName || name;
+        state.centerLat = lat;
+        state.centerLon = lon;
+        state.centerDisplayName = displayName;
+        state.lastGeocodedName = name;
+        document.getElementById('preview-coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+        document.getElementById('preview-displayname').textContent = displayName;
+      }
+
+      updateMapVisuals(displayName, lat, lon, radius);
+
+      const pipeData = await callBridge('create_area', {
+        name,
+        radius,
+        lat,
+        lon,
+        displayName
+      });
+
+      if (pipeData && pipeData.ok) {
+        state.hasGeoJson = true;
+
+        let roads = null;
+        let places = null;
+        try {
+          roads = typeof pipeData.roadsGeoJson === 'string' ? JSON.parse(pipeData.roadsGeoJson) : pipeData.roadsGeoJson;
+        } catch (e) {}
+        try {
+          places = typeof pipeData.placesGeoJson === 'string' ? JSON.parse(pipeData.placesGeoJson) : pipeData.placesGeoJson;
+        } catch (e) {}
+
+        state.roadsGeoJson = roads;
+        state.placesGeoJson = places;
+
+        renderGeoJsonOnMap(state.leafletMap, roads, places, state.areaLayers);
+        if (state.boardMap) {
+          renderGeoJsonOnMap(state.boardMap, roads, places, state.boardLayers);
+        }
+
+        document.getElementById('area-stats-box').style.display = 'block';
+        document.getElementById('stat-nodes').textContent = pipeData.nodesCount != null ? pipeData.nodesCount : 0;
+        document.getElementById('stat-edges').textContent = pipeData.edgesCount != null ? pipeData.edgesCount : 0;
+        document.getElementById('stat-places').textContent = pipeData.placesCount != null ? pipeData.placesCount : 0;
+        document.getElementById('stat-snapped').textContent = pipeData.snappedCount != null ? pipeData.snappedCount : 0;
+        if (pipeData.roadsFile) document.getElementById('stat-roads-file').textContent = pipeData.roadsFile;
+        if (pipeData.placesFile) document.getElementById('stat-places-file').textContent = pipeData.placesFile;
+
+        feedback.textContent = `Success! Operational zone pipeline completed.\n${pipeData.placesCount} facilities snapped to ${pipeData.edgesCount} road edges.`;
+        feedback.style.color = '#28a745';
+
+        const areaAlert = document.getElementById('area-alert');
+        if (areaAlert) areaAlert.style.display = 'none';
+      } else {
+        feedback.textContent = (pipeData && pipeData.error) ? pipeData.error : 'Pipeline generation failed.';
         feedback.style.color = '#d9534f';
       }
     });
   }
 }
 
-function renderGeoJsonOnLeaflet(roadsGeoJson, placesGeoJson) {
-  if (!state.leafletMap) return;
-
-  if (state.roadsLayer) state.leafletMap.removeLayer(state.roadsLayer);
-  if (state.placesLayer) state.leafletMap.removeLayer(state.placesLayer);
-
-  if (roadsGeoJson && roadsGeoJson.features && roadsGeoJson.features.length > 0) {
-    state.roadsLayer = L.geoJSON(roadsGeoJson, {
-      style: { color: '#0066cc', weight: 3.5, opacity: 0.85 }
-    }).addTo(state.leafletMap);
-  }
-
-  const categoryColors = {
-    hospital: '#e74c3c',
-    clinic: '#27ae60',
-    pharmacy: '#9b59b6',
-    fire_station: '#e67e22',
-    police: '#2980b9',
-    shelter: '#16a085'
-  };
-
-  if (placesGeoJson && placesGeoJson.features && placesGeoJson.features.length > 0) {
-    state.placesLayer = L.geoJSON(placesGeoJson, {
-      pointToLayer: (feature, latlng) => {
-        const cat = (feature.properties && feature.properties.category) ? feature.properties.category : 'hospital';
-        const markerColor = categoryColors[cat] || '#28a745';
-        return L.circleMarker(latlng, {
-          radius: 8,
-          fillColor: markerColor,
-          color: '#ffffff',
-          weight: 2,
-          opacity: 1,
-          fillOpacity: 0.95
-        });
-      },
-      onEachFeature: (feature, layer) => {
-        const name = (feature.properties && feature.properties.name) ? feature.properties.name : 'Facility';
-        const cat = (feature.properties && feature.properties.category) ? feature.properties.category : 'facility';
-        layer.bindPopup(`<b>${name}</b><br>Category: <b>${formatAmenityName(cat)}</b>`);
-      }
-    }).addTo(state.leafletMap);
-  }
-
-  try {
-    const group = new L.featureGroup([state.roadsLayer, state.placesLayer].filter(Boolean));
-    if (group.getLayers().length > 0) {
-      state.leafletMap.fitBounds(group.getBounds().pad(0.1));
-    }
-  } catch (e) {}
-}
-
 // ==========================================
-// 5. Authentication (A1, A2, A3, A4)
+// 5. Authentication & Routing
 // ==========================================
 function initAuthEvents() {
   const tabLogin = document.getElementById('tab-login');
@@ -540,14 +747,12 @@ function initAuthEvents() {
     showAuthFeedback('', '');
   });
 
-  // Dynamic role fields toggle (A3)
   if (roleSelect && unitFields) {
     roleSelect.addEventListener('change', () => {
       unitFields.style.display = (roleSelect.value === 'unit') ? 'block' : 'none';
     });
   }
 
-  // Dynamic unit type count label toggle (C1)
   if (kindSelect && countLabel && countContainer) {
     kindSelect.addEventListener('change', () => {
       const k = kindSelect.value;
@@ -572,7 +777,6 @@ function initAuthEvents() {
     });
   }
 
-  // Real Login via POST /api/bridge (A1, A2)
   document.getElementById('btn-login').addEventListener('click', async () => {
     const u = document.getElementById('login-username').value.trim();
     const p = document.getElementById('login-password').value;
@@ -594,7 +798,6 @@ function initAuthEvents() {
     }
   });
 
-  // Real Signup via POST /api/bridge (A1, A3, C1)
   document.getElementById('btn-signup').addEventListener('click', async () => {
     const u = document.getElementById('signup-username').value.trim();
     const p = document.getElementById('signup-password').value;
@@ -653,6 +856,7 @@ function showAuthFeedback(msg, color) {
 }
 
 function showAuthView(msg = '') {
+  stopBoardModules();
   document.getElementById('auth-view').style.display = 'block';
   document.getElementById('app-view').style.display = 'none';
   document.getElementById('main-nav').style.display = 'none';
@@ -663,12 +867,10 @@ function showAuthView(msg = '') {
   if (msg) showAuthFeedback(msg, '#28a745');
 }
 
-// Role-based UI Routing (A4)
 function routeByRole(role, sessionData) {
   document.getElementById('auth-view').style.display = 'none';
 
   if (role === 'unit') {
-    // Unit role gets ONLY the unit view (A4)
     document.getElementById('main-nav').style.display = 'none';
     document.getElementById('app-view').style.display = 'none';
     document.getElementById('session-info').style.display = 'none';
@@ -677,10 +879,10 @@ function routeByRole(role, sessionData) {
     const apiKeyBanner = document.getElementById('apikey-banner');
     if (apiKeyBanner) apiKeyBanner.style.display = 'none';
 
+    stopBoardModules();
     stopAlertsPolling();
     window.RapidAidUnit.init(state.user, sessionData.unit);
   } else {
-    // Dispatcher or Admin role
     const unitView = document.getElementById('unit-view');
     if (unitView) unitView.style.display = 'none';
     if (window.RapidAidUnit) window.RapidAidUnit.stop();
@@ -692,32 +894,30 @@ function routeByRole(role, sessionData) {
   }
 }
 
-function onLoginSuccess() {
+async function checkAreaStatusAndRoute() {
+  const statusRes = await callBridge('area_status');
+  if (statusRes && statusRes.ok && statusRes.exists) {
+    state.hasGeoJson = true;
+    showSection('incidents');
+    const areaAlert = document.getElementById('area-alert');
+    if (areaAlert) areaAlert.style.display = 'none';
+    await window.RapidAid.reloadLayers();
+  } else {
+    state.hasGeoJson = false;
+    showSection('area');
+    const areaAlert = document.getElementById('area-alert');
+    if (areaAlert) areaAlert.style.display = 'block';
+  }
+}
+
+async function onLoginSuccess() {
   document.getElementById('app-view').style.display = 'block';
   document.getElementById('main-nav').style.display = 'block';
   document.getElementById('session-info').style.display = 'inline';
   document.getElementById('user-display').textContent = state.user;
   document.getElementById('role-display').textContent = state.role;
 
-  const savedGeoJson = localStorage.getItem('rapidaid_has_geojson');
-  state.hasGeoJson = (savedGeoJson === 'true');
-
-  if (!state.hasGeoJson) {
-    showSection('area');
-    document.getElementById('area-alert').style.display = 'block';
-  } else {
-    showSection('incidents');
-    document.getElementById('area-alert').style.display = 'none';
-
-    try {
-      const r = JSON.parse(localStorage.getItem('rapidaid_roads_geojson') || '{}');
-      const p = JSON.parse(localStorage.getItem('rapidaid_places_geojson') || '{}');
-      state.roadsGeoJson = r;
-      state.placesGeoJson = p;
-    } catch (e) {}
-  }
-
-  ensureLeafletMap();
+  await checkAreaStatusAndRoute();
 }
 
 // ==========================================
@@ -734,6 +934,7 @@ function initNavigationEvents() {
   navStats.addEventListener('click', () => showSection('stats'));
 
   navLogout.addEventListener('click', async () => {
+    stopBoardModules();
     await callBridge('logout');
     sessionStorage.removeItem('rapidaid_token');
     state.user = null;
@@ -744,7 +945,9 @@ function initNavigationEvents() {
 }
 
 function showSection(sectionId) {
+  const prevSection = state.activeSection;
   state.activeSection = sectionId;
+
   const sections = ['area', 'incidents', 'stats'];
   sections.forEach(s => {
     const el = document.getElementById('section-' + s);
@@ -753,24 +956,28 @@ function showSection(sectionId) {
     if (nav) nav.style.fontWeight = (s === sectionId) ? 'bold' : 'normal';
   });
 
-  if (sectionId === 'area') {
-    ensureLeafletMap();
-    if (state.roadsGeoJson && state.placesGeoJson) {
-      renderGeoJsonOnLeaflet(state.roadsGeoJson, state.placesGeoJson);
-    }
+  if (prevSection === 'incidents' && sectionId !== 'incidents') {
+    stopBoardModules();
   }
 
-  // Manage dispatcher alert polling (C3)
-  if (sectionId === 'incidents') {
+  if (sectionId === 'area') {
+    ensureLeafletMap();
+    if (state.roadsGeoJson || state.placesGeoJson) {
+      renderGeoJsonOnMap(state.leafletMap, state.roadsGeoJson, state.placesGeoJson, state.areaLayers);
+    }
+  } else if (sectionId === 'incidents') {
+    startBoardModules();
     startAlertsPolling();
     refreshUnitSelect();
-  } else {
+  }
+
+  if (sectionId !== 'incidents') {
     stopAlertsPolling();
   }
 }
 
 // ==========================================
-// 7. Dispatcher Developer Test Alert (C3)
+// 7. Dispatcher Developer Test Alert Box
 // ==========================================
 function initDispatcherAlertTest() {
   const btnRefresh = document.getElementById('btn-refresh-units');
@@ -836,7 +1043,7 @@ async function refreshUnitSelect() {
   if (!select) return;
 
   const res = await callBridge('list_units');
-  select.textContent = ''; // Clear options
+  select.textContent = ''; // Clear options safely
 
   if (res && res.ok && res.units && res.units.length > 0) {
     res.units.forEach(u => {
@@ -858,10 +1065,9 @@ async function refreshAlertsTable() {
   if (!tbody) return;
 
   const res = await callBridge('list_alerts');
-  tbody.textContent = ''; // Clear rows
+  tbody.textContent = ''; // Clear rows safely
 
   if (res && res.ok && res.alerts && res.alerts.length > 0) {
-    // Show newest first
     const list = [...res.alerts].reverse();
     list.forEach(a => {
       const tr = document.createElement('tr');
@@ -931,124 +1137,8 @@ function stopAlertsPolling() {
 }
 
 // ==========================================
-// 8. Incident Report Queue (Mock/Legacy)
+// 8. Incident Event Compatibility Stub
 // ==========================================
-const incidentStore = [];
-
 function initIncidentEvents() {
-  const btnSubmit = document.getElementById('btn-submit-incident');
-  if (!btnSubmit) return;
-  const form = document.getElementById('form-incident');
-  const btnRefresh = document.getElementById('btn-refresh-incidents');
-  const feedback = document.getElementById('incident-feedback');
-
-  btnSubmit.addEventListener('click', () => {
-    const title = document.getElementById('inc-title').value.trim();
-    const location = document.getElementById('inc-location').value.trim();
-    const type = document.getElementById('inc-type').value;
-    const priority = document.getElementById('inc-priority').value;
-    const notes = document.getElementById('inc-notes').value.trim();
-
-    if (!title || !location) {
-      feedback.textContent = 'Please fill out both Incident Title and Location.';
-      feedback.style.color = '#d9534f';
-      return;
-    }
-
-    const inc = {
-      id: 'INC-' + (incidentStore.length + 101),
-      title,
-      location,
-      type,
-      priority,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      status: 'Pending Dispatch',
-      notes
-    };
-
-    incidentStore.unshift(inc);
-    renderIncidentsTable();
-
-    feedback.textContent = `Incident ${inc.id} recorded in queue (Backend pending)`;
-    feedback.style.color = '#28a745';
-    form.reset();
-  });
-
-  btnRefresh.addEventListener('click', renderIncidentsTable);
+  // Retained for backward compatibility
 }
-
-function renderIncidentsTable() {
-  const tbody = document.getElementById('incidents-body');
-  if (!tbody) return;
-
-  tbody.textContent = ''; // Clear cleanly with DOM
-
-  if (incidentStore.length === 0) {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 8;
-    td.style.textAlign = 'center';
-    td.style.color = '#888';
-    td.textContent = 'No active emergency incidents logged. Use the form to file a report.';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    return;
-  }
-
-  incidentStore.forEach(inc => {
-    const tr = document.createElement('tr');
-
-    const tdId = document.createElement('td');
-    const stId = document.createElement('strong');
-    stId.textContent = inc.id;
-    tdId.appendChild(stId);
-
-    const tdTime = document.createElement('td');
-    tdTime.textContent = inc.timestamp;
-
-    const tdTitle = document.createElement('td');
-    tdTitle.textContent = inc.title;
-
-    const tdLoc = document.createElement('td');
-    tdLoc.textContent = inc.location;
-
-    const tdType = document.createElement('td');
-    tdType.textContent = inc.type;
-
-    const tdPrio = document.createElement('td');
-    const spPrio = document.createElement('span');
-    spPrio.textContent = inc.priority;
-    spPrio.style.fontWeight = 'bold';
-    spPrio.style.color = (inc.priority === 'Critical') ? '#d9534f' :
-                         (inc.priority === 'High') ? '#f0ad4e' : '#5bc0de';
-    tdPrio.appendChild(spPrio);
-
-    const tdStat = document.createElement('td');
-    tdStat.textContent = inc.status;
-
-    const tdAct = document.createElement('td');
-    const btnDisp = document.createElement('button');
-    btnDisp.style.fontSize = '11px';
-    btnDisp.textContent = 'Dispatch Unit';
-    btnDisp.onclick = () => alert('Dispatch routing engine is under active development.');
-    tdAct.appendChild(btnDisp);
-
-    tr.appendChild(tdId);
-    tr.appendChild(tdTime);
-    tr.appendChild(tdTitle);
-    tr.appendChild(tdLoc);
-    tr.appendChild(tdType);
-    tr.appendChild(tdPrio);
-    tr.appendChild(tdStat);
-    tr.appendChild(tdAct);
-    tbody.appendChild(tr);
-  });
-
-  const totalMetric = document.getElementById('metric-total');
-  if (totalMetric) totalMetric.textContent = incidentStore.length;
-}
-
-// Global hook for unit.js
-window.RapidAidApp = {
-  showAuthView
-};

@@ -229,86 +229,89 @@
     <!-- 2B. Incident Report Handling Menu          -->
     <!-- ========================================== -->
     <section id="section-incidents" style="display: none;">
-      <div style="display: flex; justify-content: center; align-items: center; min-height: 25vh; text-align: center;">
-        <h1 style="font-size: 48px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
-      </div>
+      <div id="board-mount"></div>
+      <div id="dispatch-mount"></div>
+      <div id="board-map" style="width: 100%; height: 480px; border: 1px solid #999; border-radius: 4px; margin: 15px 0;"></div>
 
-      <!-- Developer Test Dispatch Alert Box (C3) -->
-      <div id="dispatcher-alert-test-box" style="margin: 20px auto; max-width: 850px; border: 1px solid #ccc; padding: 20px; background: #fafafa;">
-        <h3 style="margin-top: 0; color: #333;">Developer test: send a dispatch alert to a unit</h3>
-        <form id="form-test-alert" onsubmit="return false;">
-          <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 12px;">
-            <div style="flex: 1.5; min-width: 220px;">
-              <label for="alert-unit-select"><strong>Target Service Unit:</strong></label>
-              <div style="display: flex; gap: 6px; margin-top: 4px;">
-                <select id="alert-unit-select" style="flex: 1; padding: 6px;"></select>
-                <button id="btn-refresh-units" type="button" style="padding: 6px 12px; cursor: pointer;">↻ Refresh</button>
+      <!-- Developer Test Dispatch Alert Box in collapsed details -->
+      <details style="margin: 20px auto; max-width: 850px; border: 1px solid #ccc; background: #fafafa; border-radius: 4px;">
+        <summary style="padding: 10px 15px; font-weight: bold; cursor: pointer; background: #f0f0f0;">Developer tools</summary>
+        <div id="dispatcher-alert-test-box" style="padding: 20px; border-top: 1px solid #ccc;">
+          <h3 style="margin-top: 0; color: #333;">Developer test: send a dispatch alert to a unit</h3>
+          <form id="form-test-alert" onsubmit="return false;">
+            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 12px;">
+              <div style="flex: 1.5; min-width: 220px;">
+                <label for="alert-unit-select"><strong>Target Service Unit:</strong></label>
+                <div style="display: flex; gap: 6px; margin-top: 4px;">
+                  <select id="alert-unit-select" style="flex: 1; padding: 6px;"></select>
+                  <button id="btn-refresh-units" type="button" style="padding: 6px 12px; cursor: pointer;">↻ Refresh</button>
+                </div>
+              </div>
+              <div style="flex: 1; min-width: 140px;">
+                <label for="alert-type"><strong>Alert Type:</strong></label>
+                <select id="alert-type" style="width: 100%; padding: 6px; margin-top: 4px;">
+                  <option value="Medical" selected>Medical</option>
+                  <option value="Fire">Fire</option>
+                  <option value="Police">Police</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div style="flex: 0.7; min-width: 100px;">
+                <label for="alert-severity"><strong>Severity (1-5):</strong></label>
+                <input type="number" id="alert-severity" min="1" max="5" value="3" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+              </div>
+              <div style="flex: 0.8; min-width: 110px;">
+                <label for="alert-people"><strong>People Affected:</strong></label>
+                <input type="number" id="alert-people" min="0" value="1" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
               </div>
             </div>
-            <div style="flex: 1; min-width: 140px;">
-              <label for="alert-type"><strong>Alert Type:</strong></label>
-              <select id="alert-type" style="width: 100%; padding: 6px; margin-top: 4px;">
-                <option value="Medical" selected>Medical</option>
-                <option value="Fire">Fire</option>
-                <option value="Police">Police</option>
-                <option value="Other">Other</option>
-              </select>
-            </div>
-            <div style="flex: 0.7; min-width: 100px;">
-              <label for="alert-severity"><strong>Severity (1-5):</strong></label>
-              <input type="number" id="alert-severity" min="1" max="5" value="3" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
-            </div>
-            <div style="flex: 0.8; min-width: 110px;">
-              <label for="alert-people"><strong>People Affected:</strong></label>
-              <input type="number" id="alert-people" min="0" value="1" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
-            </div>
-          </div>
 
-          <div style="margin-bottom: 12px;">
-            <label for="alert-location"><strong>Location Text:</strong></label>
-            <input type="text" id="alert-location" value="12 Rue de Rivoli, Paris" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;" required>
-          </div>
-
-          <div style="display: flex; gap: 15px; margin-bottom: 12px; flex-wrap: wrap;">
-            <div style="flex: 1; min-width: 160px;">
-              <label for="alert-lat"><strong>Latitude (optional):</strong></label>
-              <input type="number" step="any" id="alert-lat" value="48.8584" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            <div style="margin-bottom: 12px;">
+              <label for="alert-location"><strong>Location Text:</strong></label>
+              <input type="text" id="alert-location" value="12 Rue de Rivoli, Paris" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;" required>
             </div>
-            <div style="flex: 1; min-width: 160px;">
-              <label for="alert-lon"><strong>Longitude (optional):</strong></label>
-              <input type="number" step="any" id="alert-lon" value="2.2945" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+
+            <div style="display: flex; gap: 15px; margin-bottom: 12px; flex-wrap: wrap;">
+              <div style="flex: 1; min-width: 160px;">
+                <label for="alert-lat"><strong>Latitude (optional):</strong></label>
+                <input type="number" step="any" id="alert-lat" value="48.8584" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+              </div>
+              <div style="flex: 1; min-width: 160px;">
+                <label for="alert-lon"><strong>Longitude (optional):</strong></label>
+                <input type="number" step="any" id="alert-lon" value="2.2945" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+              </div>
             </div>
-          </div>
 
-          <div style="margin-bottom: 12px;">
-            <label for="alert-note"><strong>Note / Instructions:</strong></label>
-            <input type="text" id="alert-note" placeholder="Provide emergency context or notes" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
-          </div>
+            <div style="margin-bottom: 12px;">
+              <label for="alert-note"><strong>Note / Instructions:</strong></label>
+              <input type="text" id="alert-note" placeholder="Provide emergency context or notes" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            </div>
 
-          <div>
-            <button id="btn-send-alert" type="button" style="padding: 8px 22px; font-weight: bold; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">Send Dispatch Alert</button>
-            <span id="alert-send-feedback" style="margin-left: 12px; font-weight: bold; font-size: 13px;"></span>
-          </div>
-        </form>
+            <div>
+              <button id="btn-send-alert" type="button" style="padding: 8px 22px; font-weight: bold; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">Send Dispatch Alert</button>
+              <span id="alert-send-feedback" style="margin-left: 12px; font-weight: bold; font-size: 13px;"></span>
+            </div>
+          </form>
 
-        <hr style="margin: 25px 0;">
-        <h4 style="margin: 0 0 10px 0;">Tracked Dispatch Alerts (Live Updates Every 3s)</h4>
-        <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
-          <thead>
-            <tr style="background: #e9ecef; border-bottom: 2px solid #ccc;">
-              <th style="padding: 8px;">ID</th>
-              <th style="padding: 8px;">Target Unit</th>
-              <th style="padding: 8px;">Type</th>
-              <th style="padding: 8px;">Severity</th>
-              <th style="padding: 8px;">State</th>
-              <th style="padding: 8px;">Created At</th>
-            </tr>
-          </thead>
-          <tbody id="alerts-table-body">
-            <tr><td colspan="6" style="padding: 10px; text-align: center; color: #777;">Loading alerts...</td></tr>
-          </tbody>
-        </table>
-      </div>
+          <hr style="margin: 25px 0;">
+          <h4 style="margin: 0 0 10px 0;">Tracked Dispatch Alerts (Live Updates Every 3s)</h4>
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+            <thead>
+              <tr style="background: #e9ecef; border-bottom: 2px solid #ccc;">
+                <th style="padding: 8px;">ID</th>
+                <th style="padding: 8px;">Target Unit</th>
+                <th style="padding: 8px;">Type</th>
+                <th style="padding: 8px;">Severity</th>
+                <th style="padding: 8px;">State</th>
+                <th style="padding: 8px;">Created At</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-table-body">
+              <tr><td colspan="6" style="padding: 10px; text-align: center; color: #777;">Loading alerts...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
     </section>
 
     <!-- ========================================== -->
@@ -338,8 +341,6 @@
     <div id="view-unit-alerts" style="display: none;"></div>
   </div>
 
-  <script src="data/out/places.js"></script>
-  <script src="data/out/roads.js"></script>
   <script src="unit.js"></script>
   <script src="app.js"></script>
 </body>
