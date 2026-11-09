@@ -102,6 +102,21 @@ bool isTokenAuthorized(const std::string& token, const std::string& requiredRole
  */
 void resetBridgeState();
 
+/**
+ * @brief Evaluates and advances the dispatch escalation state using the current wall-clock epoch time.
+ * Failure behavior: Catches all exceptions internally; never throws.
+ */
+void tickDispatch();
+
+/**
+ * @brief Evaluates and advances the dispatch escalation state for a specific epoch timestamp.
+ * Checks all Dispatched incidents, handles declined/overdue alerts, performs candidate replacement,
+ * and marks fully cleared incidents as Completed.
+ * @param nowEpoch Timestamp in epoch seconds against which alert ack timeouts are evaluated.
+ * Failure behavior: Catches all exceptions internally; never throws.
+ */
+void tickDispatch(long long nowEpoch);
+
 } // namespace rapidaid::ui
 
 #endif // RAPIDAID_UI_UIBRIDGE_HPP

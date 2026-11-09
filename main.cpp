@@ -5,8 +5,12 @@
 #include "json.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -15,30 +19,50 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 typedef int socklen_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <signal.h>
 #define closesocket close
 #define SOCKET int
 #define INVALID_SOCKET -1
 #endif
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 namespace {
+
+void openBrowser(const std::string& url) {
+#if defined(_WIN32)
+    std::string cmd = "start \"\" \"" + url + "\"";
+    std::system(cmd.c_str());
+#elif defined(__APPLE__)
+    std::string cmd = "open \"" + url + "\"";
+    std::system(cmd.c_str());
+#else
+    std::string cmd = "xdg-open \"" + url + "\"";
+    std::system(cmd.c_str());
+#endif
+}
 
 void sendHttpResponse(SOCKET client, const std::string& status, const std::string& contentType, const std::string& body) {
     std::ostringstream oss;
     oss << "HTTP/1.1 " << status << "\r\n"
         << "Content-Type: " << contentType << "\r\n"
-        << "Access-Control-Allow-Origin: *\r\n"
-        << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-        << "Access-Control-Allow-Headers: Content-Type\r\n"
         << "Content-Length: " << body.size() << "\r\n"
         << "Connection: close\r\n\r\n"
         << body;
     std::string resp = oss.str();
+#if defined(MSG_NOSIGNAL)
+    send(client, resp.c_str(), static_cast<int>(resp.size()), MSG_NOSIGNAL);
+#else
     send(client, resp.c_str(), static_cast<int>(resp.size()), 0);
+#endif
 }
 
 void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
@@ -104,13 +128,21 @@ void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
 
     if (path == "/" || path == "/index.html") {
         std::string html = rapidaid::io::FileStore::load("index.html");
-        sendHttpResponse(client, "200 OK", "text/html; charset=utf-8", html);
-    } else if (path == "/app.js") {
-        std::string js = rapidaid::io::FileStore::load("app.js");
-        sendHttpResponse(client, "200 OK", "application/javascript; charset=utf-8", js);
-    } else if (path == "/unit.js") {
-        std::string js = rapidaid::io::FileStore::load("unit.js");
-        sendHttpResponse(client, "200 OK", "application/javascript; charset=utf-8", js);
+        if (html.empty()) {
+            std::string msg = "500 Internal Server Error: Failed to load index.html in directory " +
+                              std::filesystem::current_path().string();
+            sendHttpResponse(client, "500 Internal Server Error", "text/plain", msg);
+        } else {
+            sendHttpResponse(client, "200 OK", "text/html; charset=utf-8", html);
+        }
+    } else if (path == "/app.js" || path == "/unit.js" || path == "/board.js" || path == "/dispatch.js") {
+        std::string filename = path.substr(1);
+        std::string js = rapidaid::io::FileStore::load(filename);
+        if (js.empty()) {
+            sendHttpResponse(client, "404 Not Found", "text/plain", "File not found: " + filename);
+        } else {
+            sendHttpResponse(client, "200 OK", "application/javascript; charset=utf-8", js);
+        }
     } else if (path.rfind("/data/out/", 0) == 0) {
         // Path safety: strip query string and validate path characters
         std::string rawPath = path;
@@ -177,20 +209,62 @@ void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
+#if !defined(_WIN32)
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     bool lanMode = false;
     std::string jsonArg;
+    std::string rootDir;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--lan") {
             lanMode = true;
+        } else if (arg == "--root" && i + 1 < argc) {
+            rootDir = argv[++i];
         } else if (!arg.empty() && (arg[0] == '{' || arg[0] == '[')) {
             jsonArg = arg;
         }
     }
 
+    std::cout << "Current working directory: " << std::filesystem::current_path().string() << "\n";
+    if (!rootDir.empty()) {
+        std::error_code ec;
+        std::filesystem::current_path(rootDir, ec);
+    } else {
+#if defined(_WIN32)
+        char exePath[MAX_PATH];
+        if (GetModuleFileNameA(NULL, exePath, MAX_PATH) != 0) {
+            std::filesystem::path p(exePath);
+            std::filesystem::path projectRoot = p.parent_path().parent_path();
+            std::error_code ec;
+            std::filesystem::current_path(projectRoot, ec);
+        }
+#elif defined(__APPLE__)
+        char exePath[1024];
+        uint32_t size = sizeof(exePath);
+        if (_NSGetExecutablePath(exePath, &size) == 0) {
+            std::filesystem::path p(exePath);
+            std::filesystem::path projectRoot = p.parent_path().parent_path();
+            std::error_code ec;
+            std::filesystem::current_path(projectRoot, ec);
+        }
+#else
+        char exePath[1024];
+        ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (len != -1) {
+            exePath[len] = '\0';
+            std::filesystem::path p(exePath);
+            std::filesystem::path projectRoot = p.parent_path().parent_path();
+            std::error_code ec;
+            std::filesystem::current_path(projectRoot, ec);
+        }
+#endif
+    }
+    std::cout << "Project working directory: " << std::filesystem::current_path().string() << "\n";
+
     // Mode 1: Command-line single JSON argument
-    // Example: ./rapidaid.exe '{"action":"login","payload":{"username":"admin","password":"admin123"}}'
     if (!jsonArg.empty()) {
         Auth auth("users.txt");
         rapidaid::data::DataCache cache("data", false);
@@ -198,7 +272,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // Sync any pre-existing GeoJSON files to JavaScript wrappers for instantaneous browser loading
+    // Sync pre-existing GeoJSON files to JavaScript wrappers
     std::string placesGeo = rapidaid::io::FileStore::load("data/out/places.geojson");
     if (!placesGeo.empty()) {
         rapidaid::io::FileStore::save("data/out/places.js", "window.RAPIDAID_PLACES = " + placesGeo + ";");
@@ -212,7 +286,7 @@ int main(int argc, char* argv[]) {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         std::cerr << "WSAStartup failed. Opening index.html directly.\n";
-        std::system("start index.html");
+        openBrowser("index.html");
         return 1;
     }
 #endif
@@ -220,17 +294,20 @@ int main(int argc, char* argv[]) {
     SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
     if (server == INVALID_SOCKET) {
         std::cerr << "Socket creation failed. Opening index.html directly.\n";
+        openBrowser("index.html");
 #if defined(_WIN32)
-        std::system("start index.html");
         WSACleanup();
-#else
-        std::system("xdg-open index.html");
 #endif
         return 1;
     }
 
+#if defined(_WIN32)
+    int opt = 1;
+    setsockopt(server, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
     int opt = 1;
     setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+#endif
 
     int port = 8080;
     sockaddr_in addr{};
@@ -245,14 +322,13 @@ int main(int argc, char* argv[]) {
     }
 
     if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        // Port 8080 in use; try port 8081
         port = 8081;
         addr.sin_port = htons(static_cast<uint16_t>(port));
         if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             std::cerr << "Bind failed on ports 8080/8081. Opening index.html directly.\n";
             closesocket(server);
+            openBrowser("index.html");
 #if defined(_WIN32)
-            std::system("start index.html");
             WSACleanup();
 #endif
             return 1;
@@ -262,8 +338,8 @@ int main(int argc, char* argv[]) {
     if (listen(server, 10) != 0) {
         std::cerr << "Listen failed. Opening index.html directly.\n";
         closesocket(server);
+        openBrowser("index.html");
 #if defined(_WIN32)
-        std::system("start index.html");
         WSACleanup();
 #endif
         return 1;
@@ -274,17 +350,19 @@ int main(int argc, char* argv[]) {
               << "  Bridge & Pipeline API ready for Dispatcher UI\n"
               << "========================================================\n";
 
-    // Launch UI in browser pointing to local server
-    std::string launchCmd = "start http://localhost:" + std::to_string(port);
-#if defined(_WIN32)
-    std::system(launchCmd.c_str());
-#elif defined(__APPLE__)
-    std::system(("open http://localhost:" + std::to_string(port)).c_str());
-#else
-    std::system(("xdg-open http://localhost:" + std::to_string(port)).c_str());
-#endif
+    // Launch UI in browser
+    openBrowser("http://localhost:" + std::to_string(port));
 
-    // Lazy load auth and cache for request processing
+    // Background thread calling tickDispatch() once per second
+    std::atomic<bool> bgRunning{true};
+    std::thread bgDispatchThread([&bgRunning]() {
+        while (bgRunning) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            rapidaid::ui::tickDispatch();
+        }
+    });
+    bgDispatchThread.detach();
+
     Auth auth("users.txt");
     rapidaid::data::DataCache cache("data", false);
 
