@@ -2,6 +2,7 @@
 #include "FileStore.hpp"
 #include "Graph.hpp"
 #include "GraphBuilder.hpp"
+#include "GeoJsonWriter.hpp"
 
 #include <iostream>
 #include <string>
@@ -70,6 +71,27 @@ int main() {
         std::cout << "Fewer than two snapped places found (" << successfullySnapped.size()
                   << "); cannot compute shortest path between two places.\n";
     }
+
+    // 7. Export GeoJSON
+    std::string placesOut = "data/out/places.geojson";
+    std::string roadsOut = "data/out/roads.geojson";
+    std::string pathOut = "data/out/path.geojson";
+
+    rapidaid::geojson::GeoJsonWriter::writeFile(placesOut,
+        rapidaid::geojson::GeoJsonWriter::snappedPlacesCollection(snapped));
+    rapidaid::geojson::GeoJsonWriter::writeFile(roadsOut,
+        rapidaid::geojson::GeoJsonWriter::roadsCollection(graph));
+
+    rapidaid::graph::PathResult pathExport;
+    if (successfullySnapped.size() >= 2) {
+        pathExport = graph.shortestPath(successfullySnapped[0].nodeIndex, successfullySnapped[1].nodeIndex);
+    }
+    rapidaid::geojson::GeoJsonWriter::writeFile(pathOut,
+        rapidaid::geojson::GeoJsonWriter::pathCollection(graph, pathExport));
+
+    std::cout << placesOut << "\n";
+    std::cout << roadsOut << "\n";
+    std::cout << pathOut << "\n";
 
     return 0;
 }
