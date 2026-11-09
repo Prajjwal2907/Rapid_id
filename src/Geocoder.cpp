@@ -1,4 +1,4 @@
-﻿#include "Geocoder.hpp"
+#include "Geocoder.hpp"
 #include "HttpClient.hpp"
 #include "json.hpp"
 
@@ -87,20 +87,19 @@ namespace rapidaid::geo {
         }
     }
 
-    std::optional<Location> Geocoder::geocode(const std::string& query) {
+    std::string Geocoder::fetchRaw(const std::string& query) {
         if (isAllWhitespaceOrEmpty(query)) {
-            return std::nullopt;
+            return "";
         }
 
         enforceRateLimit();
 
         std::string url = buildUrl(query);
-        std::string response = rapidaid::net::HttpClient::get(url);
-        if (response.empty()) {
-            return std::nullopt;
-        }
+        return rapidaid::net::HttpClient::get(url);
+    }
 
-        return parseResponse(response);
+    std::optional<Location> Geocoder::geocode(const std::string& query) {
+        return parseResponse(fetchRaw(query));
     }
 
 } // namespace rapidaid::geo

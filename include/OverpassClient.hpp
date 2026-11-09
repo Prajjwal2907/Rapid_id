@@ -1,4 +1,4 @@
-﻿#ifndef OVERPASS_CLIENT_HPP
+#ifndef OVERPASS_CLIENT_HPP
 #define OVERPASS_CLIENT_HPP
 
 #include <string>
@@ -34,6 +34,12 @@ public:
     // Validates radius (1..50000), lat ([-90, 90]), and lon ([-180, 180]).
     // Retries up to 3 times total with exponential backoff (2s, 4s) when HttpClient returns "" (504/timeouts).
     static std::vector<Place> findNearby(Category category, double lat, double lon, int radiusMeters);
+
+    // Fetches raw Overpass JSON response body.
+    // Validates radius (1..50000), lat ([-90, 90]), and lon ([-180, 180]); returns "" on invalid input.
+    // Retries up to 3 times total with exponential backoff (2s, 4s) when HttpClient returns "".
+    // Returns the first non-empty body, or "" if all attempts fail.
+    static std::string fetchRaw(Category category, double lat, double lon, int radiusMeters);
 
     // Pure functions, no network:
 
