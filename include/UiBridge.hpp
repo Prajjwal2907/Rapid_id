@@ -103,6 +103,13 @@ bool isTokenAuthorized(const std::string& token, const std::string& requiredRole
 void resetBridgeState();
 
 /**
+ * @brief Sets a custom clock supplier function for session timeout testing.
+ * @param clockFn Function returning epoch timestamp in seconds.
+ * Failure behavior: Never throws.
+ */
+void setClockForTesting(std::function<long long()> clockFn);
+
+/**
  * @brief Evaluates and advances the dispatch escalation state using the current wall-clock epoch time.
  * Failure behavior: Catches all exceptions internally; never throws.
  */

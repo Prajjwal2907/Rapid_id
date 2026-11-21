@@ -1,4 +1,4 @@
-﻿#include "Geocoder.hpp"
+#include "Geocoder.hpp"
 #include <iostream>
 #include <cmath>
 

@@ -1,4 +1,4 @@
-﻿#include "OverpassClient.hpp"
+#include "OverpassClient.hpp"
 #include <iostream>
 #include <string>
 #include <vector>

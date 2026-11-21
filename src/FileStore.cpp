@@ -44,6 +44,41 @@ bool FileStore::save(const std::string& path, const std::string& text) {
     }
 }
 
+bool FileStore::saveSecret(const std::string& path, const std::string& text) {
+    if (!save(path, text)) {
+        return false;
+    }
+    try {
+        std::error_code ec;
+#ifndef _WIN32
+        std::filesystem::permissions(
+            path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            ec
+        );
+        if (ec) {
+            return false;
+        }
+#else
+        std::filesystem::permissions(
+            path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace,
+            ec
+        );
+        // On Windows, best effort: do not fail saveSecret if permissions cannot be set
+#endif
+        return true;
+    } catch (...) {
+#ifndef _WIN32
+        return false;
+#else
+        return true;
+#endif
+    }
+}
+
 std::string FileStore::load(const std::string& path) {
     try {
         std::error_code ec;

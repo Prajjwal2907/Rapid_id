@@ -1,5 +1,6 @@
 #include "OverpassClient.hpp"
 #include "HttpClient.hpp"
+#include "OverpassEndpoint.hpp"
 #include "json.hpp"
 
 #include <chrono>
@@ -200,8 +201,6 @@ std::string OverpassClient::fetchRaw(Category category, double lat, double lon, 
         return "";
     }
 
-    static const std::string overpassUrl = "https://overpass-api.de/api/interpreter";
-
     std::string response;
     const int maxAttempts = 3;
     const std::chrono::seconds backoffTimes[] = {
@@ -210,7 +209,8 @@ std::string OverpassClient::fetchRaw(Category category, double lat, double lon, 
     };
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        response = rapidaid::net::HttpClient::post(overpassUrl, body);
+        const char* endpoint = (attempt < 2) ? rapidaid::net::kOverpassPrimaryUrl : rapidaid::net::kOverpassFallbackUrl;
+        response = rapidaid::net::HttpClient::post(endpoint, body);
         if (!response.empty()) {
             break;
         }

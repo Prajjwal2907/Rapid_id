@@ -1,12 +1,13 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Iinclude $(EXTRA_INCLUDES)
-LDLIBS ?= -lcurl -pthread
+LDLIBS ?= -lcurl -lcrypto -pthread
 ifeq ($(OS),Windows_NT)
   LDLIBS += -lws2_32
 endif
 
 SRCS = $(filter-out src/main.cpp src/priority_queue.cpp,$(wildcard src/*.cpp))
 LIB_OBJS = $(patsubst src/%.cpp,build/%.o,$(SRCS))
+OBJS ?= $(LIB_OBJS)
 DEPS = $(LIB_OBJS:.o=.d) build/main.d
 
 TEST_SRCS = $(wildcard tests/test_*.cpp)
@@ -14,6 +15,7 @@ TEST_EXES = $(patsubst tests/%.cpp,build/%.exe,$(TEST_SRCS))
 TEST_DEPS = $(patsubst tests/%.cpp,build/%.d,$(TEST_SRCS))
 
 OFFLINE_TEST_SRCS = $(wildcard tests/*_offline.cpp)
+OFFLINE_TESTS ?= $(OFFLINE_TEST_SRCS)
 OFFLINE_TEST_EXES = $(patsubst tests/%.cpp,build/%.exe,$(OFFLINE_TEST_SRCS))
 
 .PHONY: all app tests offline clean
@@ -55,10 +57,14 @@ offline: $(OFFLINE_TEST_EXES)
 	@if [ -z "$(OFFLINE_TEST_EXES)" ]; then \
 		echo "No offline tests found."; \
 	else \
+		failed=0; \
 		for test in $(OFFLINE_TEST_EXES); do \
 			echo "Running $$test..."; \
-			./$$test || exit 1; \
+			./$$test || failed=1; \
 		done; \
+		if [ $$failed -ne 0 ]; then \
+			exit 1; \
+		fi; \
 	fi
 
 clean:

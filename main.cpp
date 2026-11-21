@@ -1,5 +1,6 @@
 #include "DataCache.hpp"
 #include "FileStore.hpp"
+#include "HttpGuard.hpp"
 #include "Login.hpp"
 #include "UiBridge.hpp"
 #include "json.hpp"
@@ -23,6 +24,7 @@
 typedef int socklen_t;
 #else
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <signal.h>
@@ -37,6 +39,8 @@ typedef int socklen_t;
 
 namespace {
 
+std::atomic<int> g_activeConnections{0};
+
 void openBrowser(const std::string& url) {
 #if defined(_WIN32)
     std::string cmd = "start \"\" \"" + url + "\"";
@@ -50,12 +54,14 @@ void openBrowser(const std::string& url) {
 #endif
 }
 
-void sendHttpResponse(SOCKET client, const std::string& status, const std::string& contentType, const std::string& body) {
+void sendHttpResponse(SOCKET client, const std::string& status, const std::string& contentType, const std::string& body, const std::string& path = "") {
     std::ostringstream oss;
     oss << "HTTP/1.1 " << status << "\r\n"
         << "Content-Type: " << contentType << "\r\n"
         << "Content-Length: " << body.size() << "\r\n"
-        << "Connection: close\r\n\r\n"
+        << "Connection: close\r\n"
+        << rapidaid::http::HttpGuard::securityHeaders(path)
+        << "\r\n"
         << body;
     std::string resp = oss.str();
 #if defined(MSG_NOSIGNAL)
@@ -65,14 +71,36 @@ void sendHttpResponse(SOCKET client, const std::string& status, const std::strin
 #endif
 }
 
-void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
+void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache, int port, bool lanMode) {
+    // Cap concurrent connections at 64
+    if (g_activeConnections.fetch_add(1) >= 64) {
+        g_activeConnections.fetch_sub(1);
+        sendHttpResponse(client, "503 Service Unavailable", "text/plain", "Service Unavailable", "/");
+        closesocket(client);
+        return;
+    }
+    struct ConnGuard {
+        ~ConnGuard() { g_activeConnections.fetch_sub(1); }
+    } connGuard;
+
+    // Set socket receive timeout to 10 seconds
+#if defined(_WIN32)
+    DWORD rcvTimeout = 10000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
+#else
+    struct timeval rcvTimeout;
+    rcvTimeout.tv_sec = 10;
+    rcvTimeout.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, sizeof(rcvTimeout));
+#endif
+
     std::string req;
     char buf[4096];
     size_t headerEnd = std::string::npos;
     size_t contentLength = 0;
     bool hasContentLength = false;
 
-    // Read full request headers and Content-Length body
+    // Read full request headers (max 16 KB) and Content-Length body (max 1 MB)
     while (true) {
         int n = recv(client, buf, sizeof(buf), 0);
         if (n <= 0) break;
@@ -80,6 +108,11 @@ void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
 
         if (headerEnd == std::string::npos) {
             headerEnd = req.find("\r\n\r\n");
+            if (headerEnd == std::string::npos && req.size() > 16384) { // reject headers > 16 KB
+                sendHttpResponse(client, "431 Request Header Fields Too Large", "text/plain", "Request Header Fields Too Large", "/");
+                closesocket(client);
+                return;
+            }
             if (headerEnd != std::string::npos) {
                 std::string headers = req.substr(0, headerEnd);
                 std::string clTag = "content-length:";
@@ -99,7 +132,7 @@ void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
 
         if (hasContentLength) {
             if (contentLength > 1024 * 1024) { // reject bodies > 1 MB
-                sendHttpResponse(client, "413 Payload Too Large", "text/plain", "Payload Too Large");
+                sendHttpResponse(client, "413 Payload Too Large", "text/plain", "Payload Too Large", "/");
                 closesocket(client);
                 return;
             }
@@ -116,91 +149,115 @@ void handleClient(SOCKET client, Auth& auth, rapidaid::data::DataCache& cache) {
         return;
     }
 
+    std::string headers = req.substr(0, headerEnd);
+
+    // Host header validation
+    std::string hostHeader;
+    {
+        std::string lowerHeaders = headers;
+        std::transform(lowerHeaders.begin(), lowerHeaders.end(), lowerHeaders.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string hostTag = "host:";
+        auto pos = lowerHeaders.find(hostTag);
+        if (pos != std::string::npos) {
+            auto lineEnd = headers.find("\r\n", pos);
+            std::string hVal = headers.substr(pos + hostTag.size(),
+                lineEnd == std::string::npos ? std::string::npos : lineEnd - (pos + hostTag.size()));
+            size_t s = 0;
+            while (s < hVal.size() && std::isspace(static_cast<unsigned char>(hVal[s]))) s++;
+            size_t e = hVal.size();
+            while (e > s && std::isspace(static_cast<unsigned char>(hVal[e - 1]))) e--;
+            hostHeader = hVal.substr(s, e - s);
+        }
+    }
+
+    if (hostHeader.empty() || !rapidaid::http::HttpGuard::isHostAllowed(hostHeader, port, lanMode)) {
+        sendHttpResponse(client, "403 Forbidden", "text/plain", "Forbidden: Invalid Host header", "/");
+        closesocket(client);
+        return;
+    }
+
     std::istringstream iss(req);
     std::string method, path;
     iss >> method >> path;
 
     if (method == "OPTIONS") {
-        sendHttpResponse(client, "200 OK", "text/plain", "");
+        sendHttpResponse(client, "405 Method Not Allowed", "text/plain", "Method Not Allowed", path);
         closesocket(client);
         return;
     }
 
-    if (path == "/" || path == "/index.html") {
-        std::string html = rapidaid::io::FileStore::load("index.html");
-        if (html.empty()) {
-            std::string msg = "500 Internal Server Error: Failed to load index.html in directory " +
-                              std::filesystem::current_path().string();
-            sendHttpResponse(client, "500 Internal Server Error", "text/plain", msg);
-        } else {
-            sendHttpResponse(client, "200 OK", "text/html; charset=utf-8", html);
-        }
-    } else if (path == "/app.js" || path == "/unit.js" || path == "/board.js" || path == "/dispatch.js") {
-        std::string filename = path.substr(1);
-        std::string js = rapidaid::io::FileStore::load(filename);
-        if (js.empty()) {
-            sendHttpResponse(client, "404 Not Found", "text/plain", "File not found: " + filename);
-        } else {
-            sendHttpResponse(client, "200 OK", "application/javascript; charset=utf-8", js);
-        }
-    } else if (path.rfind("/data/out/", 0) == 0) {
-        // Path safety: strip query string and validate path characters
-        std::string rawPath = path;
-        auto qPos = rawPath.find('?');
-        if (qPos != std::string::npos) {
-            rawPath = rawPath.substr(0, qPos);
-        }
+    if (method != "GET" && method != "POST") {
+        sendHttpResponse(client, "405 Method Not Allowed", "text/plain", "Method Not Allowed", path);
+        closesocket(client);
+        return;
+    }
 
-        if (rawPath.find("..") != std::string::npos || rawPath.find('\\') != std::string::npos) {
-            sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found");
+    if (method == "GET" && path.rfind("/api/", 0) == 0) {
+        sendHttpResponse(client, "405 Method Not Allowed", "text/plain", "Method Not Allowed", path);
+        closesocket(client);
+        return;
+    }
+
+    if (method == "POST" && path.rfind("/api/", 0) != 0) {
+        sendHttpResponse(client, "405 Method Not Allowed", "text/plain", "Method Not Allowed", path);
+        closesocket(client);
+        return;
+    }
+
+    if (method == "GET") {
+        std::string normPath = rapidaid::http::HttpGuard::normalizeStaticPath(path);
+        if (normPath.empty() || !rapidaid::http::HttpGuard::isPathAllowed(normPath)) {
+            sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found", normPath);
             closesocket(client);
             return;
         }
 
-        bool isJs = (rawPath.size() >= 3 && rawPath.rfind(".js") == rawPath.size() - 3);
-        bool isGeoJson = (rawPath.size() >= 8 && rawPath.rfind(".geojson") == rawPath.size() - 8);
-        bool isJson = (rawPath.size() >= 5 && rawPath.rfind(".json") == rawPath.size() - 5);
-
-        if (!isJs && !isGeoJson && !isJson) {
-            sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found");
-            closesocket(client);
-            return;
-        }
-
-        std::string filePath = rawPath.substr(1);
-        std::string content = rapidaid::io::FileStore::load(filePath);
-        if (content.empty()) {
-            sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found");
-            closesocket(client);
-            return;
-        }
-
-        std::string contentType = isJs ? "application/javascript; charset=utf-8" : "application/json; charset=utf-8";
-        sendHttpResponse(client, "200 OK", contentType, content);
-    } else if (path == "/api/bridge") {
-        std::string body = req.substr(headerEnd + 4);
-        std::string result = rapidaid::ui::handleBridgeMessage(auth, cache, body, "data/out");
-        sendHttpResponse(client, "200 OK", "application/json; charset=utf-8", result);
-    } else if (path == "/api/create_area" || path == "/api/pipeline") {
-        std::string body = req.substr(headerEnd + 4);
-        std::string token;
-        try {
-            nlohmann::json j = nlohmann::json::parse(body);
-            if (j.contains("token") && j["token"].is_string()) {
-                token = j["token"].get<std::string>();
+        std::string contentType = rapidaid::http::HttpGuard::contentTypeFor(normPath);
+        if (normPath == "/index.html") {
+            std::string html = rapidaid::io::FileStore::load("index.html");
+            if (html.empty()) {
+                std::string msg = "500 Internal Server Error: Failed to load index.html in directory " +
+                                  std::filesystem::current_path().string();
+                sendHttpResponse(client, "500 Internal Server Error", "text/plain", msg, normPath);
+            } else {
+                sendHttpResponse(client, "200 OK", contentType, html, normPath);
             }
-        } catch (...) {}
-
-        if (!rapidaid::ui::isTokenAuthorized(token, "dispatcher")) {
-            sendHttpResponse(client, "403 Forbidden", "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"Not allowed\"}");
-            closesocket(client);
-            return;
+        } else {
+            std::string relPath = normPath.substr(1);
+            std::string content = rapidaid::io::FileStore::load(relPath);
+            if (content.empty()) {
+                sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found", normPath);
+            } else {
+                sendHttpResponse(client, "200 OK", contentType, content, normPath);
+            }
         }
+    } else { // POST /api/*
+        if (path == "/api/bridge") {
+            std::string body = req.substr(headerEnd + 4);
+            std::string result = rapidaid::ui::handleBridgeMessage(auth, cache, body, "data/out");
+            sendHttpResponse(client, "200 OK", "application/json; charset=utf-8", result, path);
+        } else if (path == "/api/create_area" || path == "/api/pipeline") {
+            std::string body = req.substr(headerEnd + 4);
+            std::string token;
+            try {
+                nlohmann::json j = nlohmann::json::parse(body);
+                if (j.contains("token") && j["token"].is_string()) {
+                    token = j["token"].get<std::string>();
+                }
+            } catch (...) {}
 
-        std::string result = rapidaid::ui::handleCreateAreaRequest(cache, body, "data/out");
-        sendHttpResponse(client, "200 OK", "application/json; charset=utf-8", result);
-    } else {
-        sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found");
+            if (!rapidaid::ui::isTokenAuthorized(token, "dispatcher")) {
+                sendHttpResponse(client, "403 Forbidden", "application/json; charset=utf-8", "{\"ok\":false,\"error\":\"Not allowed\"}", path);
+                closesocket(client);
+                return;
+            }
+
+            std::string result = rapidaid::ui::handleCreateAreaRequest(cache, body, "data/out");
+            sendHttpResponse(client, "200 OK", "application/json; charset=utf-8", result, path);
+        } else {
+            sendHttpResponse(client, "404 Not Found", "text/plain", "Not Found", path);
+        }
     }
 
     closesocket(client);
@@ -264,9 +321,17 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "Project working directory: " << std::filesystem::current_path().string() << "\n";
 
+    std::error_code ec;
+    std::filesystem::create_directories("data", ec);
+
+    Auth auth("users.txt");
+    if (!auth.ready()) {
+        std::cerr << "Auth not ready: " << auth.notReadyReason() << "\n";
+        return 1;
+    }
+
     // Mode 1: Command-line single JSON argument
     if (!jsonArg.empty()) {
-        Auth auth("users.txt");
         rapidaid::data::DataCache cache("data", false);
         std::cout << rapidaid::ui::handleBridgeMessage(auth, cache, jsonArg, "data/out") << "\n";
         return 0;
@@ -363,7 +428,6 @@ int main(int argc, char* argv[]) {
     });
     bgDispatchThread.detach();
 
-    Auth auth("users.txt");
     rapidaid::data::DataCache cache("data", false);
 
     while (true) {
@@ -371,8 +435,8 @@ int main(int argc, char* argv[]) {
         if (client == INVALID_SOCKET) {
             break;
         }
-        std::thread([client, &auth, &cache]() {
-            handleClient(client, auth, cache);
+        std::thread([client, &auth, &cache, port, lanMode]() {
+            handleClient(client, auth, cache, port, lanMode);
         }).detach();
     }
 

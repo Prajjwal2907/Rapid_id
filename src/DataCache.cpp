@@ -71,15 +71,25 @@ Result DataCache::getCachedOrFetch(const std::string& path,
     }
 
     std::string raw = fetcher();
-    if (raw.empty()) {
-        return Result{};
+    if (!raw.empty()) {
+        Result result = parser(raw);
+        if (!isEmpty(result)) {
+            rapidaid::io::FileStore::save(path, raw);
+            return result;
+        }
     }
 
-    Result result = parser(raw);
-    if (!isEmpty(result)) {
-        rapidaid::io::FileStore::save(path, raw);
+    if (rapidaid::io::FileStore::exists(path)) {
+        std::string cached = rapidaid::io::FileStore::load(path);
+        if (!cached.empty()) {
+            Result fallback = parser(cached);
+            if (!isEmpty(fallback)) {
+                return fallback;
+            }
+        }
     }
-    return result;
+
+    return Result{};
 }
 
 std::optional<rapidaid::geo::Location> DataCache::geocode(const std::string& query) {

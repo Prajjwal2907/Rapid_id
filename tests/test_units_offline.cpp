@@ -36,7 +36,14 @@ int main() {
     fs::current_path(tempDir, ec);
 
     // Initialize Auth and Cache inside temporary directory
-    Auth auth("users.txt");
+    AuthOptions opts;
+    opts.usersPath = "users.txt";
+    opts.keyPath = "auth.key";
+    opts.bootstrapAdminPassword = "Admin-Test-Pass-9";
+    opts.pbkdf2Iterations = 1000;
+    opts.announceBootstrap = false;
+    Auth auth(opts);
+
     rapidaid::data::DataCache cache("cache_data", false);
     std::string outDir = "data/out";
     fs::create_directories(outDir, ec);
@@ -51,65 +58,76 @@ int main() {
     {
         std::cout << "\n--- Case 1: Signup validation & rules ---\n";
 
-        // Dispatcher signup works
-        std::string req1 = R"({"action":"signup","payload":{"username":"disp1","password":"pw1","role":"dispatcher"}})";
+        // Dispatcher signup works (self-signup defaults to pending)
+        std::string req1 = R"({"action":"signup","payload":{"username":"disp1","password":"Disp-Pass-1234","role":"dispatcher"}})";
         std::string res1 = rapidaid::ui::handleBridgeMessage(auth, cache, req1, outDir);
         auto j1 = nlohmann::json::parse(res1);
         check(j1.value("ok", false), "Case 1: signup of a dispatcher works", failed);
 
         // Role admin without admin token is rejected
-        std::string req2 = R"({"action":"signup","payload":{"username":"admin2","password":"pw2","role":"admin"}})";
+        std::string req2 = R"({"action":"signup","payload":{"username":"admin2","password":"Admin-Pass-1234","role":"admin"}})";
         std::string res2 = rapidaid::ui::handleBridgeMessage(auth, cache, req2, outDir);
         auto j2 = nlohmann::json::parse(res2);
         check(!j2.value("ok", true), "Case 1: signup role admin without admin token is rejected", failed);
 
         // Username with space is rejected
-        std::string req3 = R"({"action":"signup","payload":{"username":"bad user","password":"pw3","role":"dispatcher"}})";
+        std::string req3 = R"({"action":"signup","payload":{"username":"bad user","password":"Test-Pass-1234","role":"dispatcher"}})";
         std::string res3 = rapidaid::ui::handleBridgeMessage(auth, cache, req3, outDir);
         auto j3 = nlohmann::json::parse(res3);
         check(!j3.value("ok", true), "Case 1: username with a space is rejected", failed);
 
         // Invalid unit profiles rejected and account not created
         // a) Negative count
-        std::string req4 = R"({"action":"signup","payload":{"username":"bad_amb1","password":"pw","role":"unit","unit":{"kind":"ambulance","name":"A1","lat":48.8,"lon":2.2,"count":-5}}})";
+        std::string req4 = R"({"action":"signup","payload":{"username":"bad_amb1","password":"Bad-Unit-Pass-1","role":"unit","unit":{"kind":"ambulance","name":"A1","lat":48.8,"lon":2.2,"count":-5}}})";
         std::string res4 = rapidaid::ui::handleBridgeMessage(auth, cache, req4, outDir);
         auto j4 = nlohmann::json::parse(res4);
         check(!j4.value("ok", true), "Case 1: signup unit with negative count rejected", failed);
 
-        std::string loginCheck1 = R"({"action":"login","payload":{"username":"bad_amb1","password":"pw"}})";
+        std::string loginCheck1 = R"({"action":"login","payload":{"username":"bad_amb1","password":"Bad-Unit-Pass-1"}})";
         std::string lres1 = rapidaid::ui::handleBridgeMessage(auth, cache, loginCheck1, outDir);
         auto lj1 = nlohmann::json::parse(lres1);
         check(!lj1.value("ok", true), "Case 1: failed signup with negative count did not create account", failed);
 
         // b) Bad latitude (> 90)
-        std::string req5 = R"({"action":"signup","payload":{"username":"bad_amb2","password":"pw","role":"unit","unit":{"kind":"ambulance","name":"A2","lat":120.0,"lon":2.2,"count":2}}})";
+        std::string req5 = R"({"action":"signup","payload":{"username":"bad_amb2","password":"Bad-Unit-Pass-1","role":"unit","unit":{"kind":"ambulance","name":"A2","lat":120.0,"lon":2.2,"count":2}}})";
         std::string res5 = rapidaid::ui::handleBridgeMessage(auth, cache, req5, outDir);
         auto j5 = nlohmann::json::parse(res5);
         check(!j5.value("ok", true), "Case 1: signup unit with bad lat rejected", failed);
 
-        std::string loginCheck2 = R"({"action":"login","payload":{"username":"bad_amb2","password":"pw"}})";
+        std::string loginCheck2 = R"({"action":"login","payload":{"username":"bad_amb2","password":"Bad-Unit-Pass-1"}})";
         auto lj2 = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, loginCheck2, outDir));
         check(!lj2.value("ok", true), "Case 1: failed signup with bad lat did not create account", failed);
 
         // c) Empty name
-        std::string req6 = R"({"action":"signup","payload":{"username":"bad_amb3","password":"pw","role":"unit","unit":{"kind":"ambulance","name":"","lat":48.8,"lon":2.2,"count":2}}})";
+        std::string req6 = R"({"action":"signup","payload":{"username":"bad_amb3","password":"Bad-Unit-Pass-1","role":"unit","unit":{"kind":"ambulance","name":"","lat":48.8,"lon":2.2,"count":2}}})";
         std::string res6 = rapidaid::ui::handleBridgeMessage(auth, cache, req6, outDir);
         auto j6 = nlohmann::json::parse(res6);
         check(!j6.value("ok", true), "Case 1: signup unit with empty name rejected", failed);
 
-        std::string loginCheck3 = R"({"action":"login","payload":{"username":"bad_amb3","password":"pw"}})";
+        std::string loginCheck3 = R"({"action":"login","payload":{"username":"bad_amb3","password":"Bad-Unit-Pass-1"}})";
         auto lj3 = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, loginCheck3, outDir));
         check(!lj3.value("ok", true), "Case 1: failed signup with empty name did not create account", failed);
 
         // d) Unknown kind
-        std::string req7 = R"({"action":"signup","payload":{"username":"bad_amb4","password":"pw","role":"unit","unit":{"kind":"helicopter","name":"H1","lat":48.8,"lon":2.2,"count":2}}})";
+        std::string req7 = R"({"action":"signup","payload":{"username":"bad_amb4","password":"Bad-Unit-Pass-1","role":"unit","unit":{"kind":"helicopter","name":"H1","lat":48.8,"lon":2.2,"count":2}}})";
         std::string res7 = rapidaid::ui::handleBridgeMessage(auth, cache, req7, outDir);
         auto j7 = nlohmann::json::parse(res7);
         check(!j7.value("ok", true), "Case 1: signup unit with unknown kind rejected", failed);
 
-        std::string loginCheck4 = R"({"action":"login","payload":{"username":"bad_amb4","password":"pw"}})";
+        std::string loginCheck4 = R"({"action":"login","payload":{"username":"bad_amb4","password":"Bad-Unit-Pass-1"}})";
         auto lj4 = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, loginCheck4, outDir));
         check(!lj4.value("ok", true), "Case 1: failed signup with unknown kind did not create account", failed);
+
+        // Dispatcher login before approval fails with pending
+        std::string dLogReqBefore = R"({"action":"login","payload":{"username":"disp1","password":"Disp-Pass-1234"}})";
+        auto dLogBeforeJ = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, dLogReqBefore, outDir));
+        check(!dLogBeforeJ.value("ok", true) && dLogBeforeJ.value("code", "") == "account_pending",
+              "Case 1: unapproved dispatcher login returns account_pending", failed);
+
+        // Approve dispatcher
+        std::string appErr;
+        bool approvedDisp = auth.approve("disp1", appErr);
+        check(approvedDisp, "Case 1: approving disp1 succeeds", failed);
     }
 
     // =========================================================================
@@ -128,11 +146,12 @@ int main() {
         std::cout << "\n--- Case 2: Signup & login for 7 service kinds ---\n";
 
         // Login dispatcher to obtain token
-        std::string dLogReq = R"({"action":"login","payload":{"username":"disp1","password":"pw1"}})";
+        std::string dLogReq = R"({"action":"login","payload":{"username":"disp1","password":"Disp-Pass-1234"}})";
         std::string dLogRes = rapidaid::ui::handleBridgeMessage(auth, cache, dLogReq, outDir);
         auto dLogJ = nlohmann::json::parse(dLogRes);
         dispToken = dLogJ.value("token", "");
         check(!dispToken.empty(), "Case 2: dispatcher login returned session token", failed);
+        check(dispToken.length() == 64, "Case 2: dispatcher session token is 64 hex chars", failed);
 
         struct KindSpec {
             std::string user;
@@ -152,7 +171,7 @@ int main() {
         };
 
         for (const auto& k : kinds) {
-            std::string pw = "pass_" + k.user;
+            std::string pw = "Secure-Pass-Kind-99#";
             nlohmann::ordered_json suReq;
             suReq["action"] = "signup";
             suReq["payload"] = {
@@ -172,18 +191,53 @@ int main() {
             auto suJ = nlohmann::json::parse(suRes);
             check(suJ.value("ok", false), "Case 2: signup succeeded for kind " + k.kind, failed);
 
-            // Login
-            nlohmann::ordered_json logReq;
-            logReq["action"] = "login";
-            logReq["payload"] = {{"username", k.user}, {"password", pw}};
-            std::string logRes = rapidaid::ui::handleBridgeMessage(auth, cache, logReq.dump(), outDir);
+            // Unit is pending before approval; login fails
+            nlohmann::ordered_json logPendReq;
+            logPendReq["action"] = "login";
+            logPendReq["payload"] = {{"username", k.user}, {"password", pw}};
+            auto logPendJ = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, logPendReq.dump(), outDir));
+            check(!logPendJ.value("ok", true) && logPendJ.value("code", "") == "account_pending",
+                  "Case 2: unapproved unit login returns account_pending for " + k.kind, failed);
+
+            // Unapproved unit is NOT visible in list_units
+            nlohmann::ordered_json listUnitsBefore;
+            listUnitsBefore["action"] = "list_units";
+            listUnitsBefore["token"] = dispToken;
+            auto listBeforeJ = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, listUnitsBefore.dump(), outDir));
+            bool foundBefore = false;
+            for (const auto& uItem : listBeforeJ.value("units", nlohmann::json::array())) {
+                if (uItem.value("username", "") == k.user) {
+                    foundBefore = true;
+                    break;
+                }
+            }
+            check(!foundBefore, "Case 2: unapproved unit " + k.user + " hidden from list_units", failed);
+
+            // Approve unit
+            std::string appErr;
+            bool appOk = auth.approve(k.user, appErr);
+            check(appOk, "Case 2: approve unit succeeded for " + k.kind, failed);
+
+            // Approved unit is now visible in list_units
+            auto listAfterJ = nlohmann::json::parse(rapidaid::ui::handleBridgeMessage(auth, cache, listUnitsBefore.dump(), outDir));
+            bool foundAfter = false;
+            for (const auto& uItem : listAfterJ.value("units", nlohmann::json::array())) {
+                if (uItem.value("username", "") == k.user) {
+                    foundAfter = true;
+                    break;
+                }
+            }
+            check(foundAfter, "Case 2: approved unit " + k.user + " visible in list_units", failed);
+
+            // Login succeeds after approval
+            std::string logRes = rapidaid::ui::handleBridgeMessage(auth, cache, logPendReq.dump(), outDir);
             auto logJ = nlohmann::json::parse(logRes);
 
             check(logJ.value("ok", false), "Case 2: login succeeded for kind " + k.kind, failed);
             check(logJ.value("role", "") == "unit", "Case 2: role is 'unit' for " + k.kind, failed);
 
             std::string tok = logJ.value("token", "");
-            check(tok.length() == 32, "Case 2: 32-char token returned for " + k.kind, failed);
+            check(tok.length() == 64, "Case 2: 64-char token returned for " + k.kind, failed);
             *(k.tokenOut) = tok;
 
             // Responses never leak password or hash

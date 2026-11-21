@@ -188,17 +188,23 @@ int main() {
         // Place near node (approx 15 meters away)
         Place pNear;
         pNear.id = 1;
+        pNear.osmType = "node";
         pNear.lat = 12.9717;
         pNear.lon = 77.5947;
         pNear.name = "Near Clinic";
+        pNear.tags = {{"amenity", "clinic"}};
+        pNear.category = rapidaid::osm::Category::Clinic;
 
         // Place far away (~5.5 km away)
         // 0.05 degrees latitude is roughly 5.5 km
         Place pFar;
         pFar.id = 2;
+        pFar.osmType = "node";
         pFar.lat = 13.0216;
         pFar.lon = 77.5946;
         pFar.name = "Far Hospital";
+        pFar.tags = {{"amenity", "hospital"}};
+        pFar.category = rapidaid::osm::Category::Hospital;
 
         std::vector<Place> places = {pNear, pFar};
         std::vector<SnappedPlace> snapped = GraphBuilder::snapPlaces(g, places, 500.0);

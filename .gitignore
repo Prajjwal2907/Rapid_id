@@ -1,10 +1,16 @@
-include/Config.local.hpp
+# Build artifacts
 build/
 *.o
 *.exe
-data/
+
+# Local configuration and credentials
+include/Config.local.hpp
 config.json
 config.local.json
 api_key.txt
+
+# Dynamic runtime data and persistence
+data/
 users.txt
+users.txt.migrated
 log.txt

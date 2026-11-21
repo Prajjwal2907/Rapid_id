@@ -5,16 +5,19 @@
  * - Role-based UI routing (Dispatcher / Admin vs Service Unit)
  * - Bridge-based OSM Geocoding & Area Pipeline
  * - Shared Leaflet Map Engine for Area & Incident Board
- * - Modular Loader for RapidAidBoard and RapidAidDispatch
+ * - Modular Loader for RapidAidBoard, RapidAidDispatch, RapidAidStats, RapidAidAdmin
  * - Dispatcher Developer Test Alert panel & 3s live alert polling
- * Strict textContent usage for all dynamic text to prevent XSS.
+ * Strict DOM nodes and textContent usage for all dynamic text to prevent XSS.
  */
 
 const state = {
   user: null,
   role: null,
-  activeSection: 'area',
+  activeSection: 'incidents',
   hasGeoJson: false,
+  mustChangePassword: false,
+  sessionData: null,
+  previousSection: null,
   centerLat: 48.8583,
   centerLon: 2.2945,
   centerDisplayName: 'Eiffel Tower, Paris',
@@ -36,9 +39,11 @@ const state = {
 let dispatcherAlertsTimer = null;
 let boardRunning = false;
 let dispatchRunning = false;
+let statsRunning = false;
+let adminRunning = false;
 
 // ==========================================
-// API Bridge Helper
+// API Bridge Helper & Session Handling
 // ==========================================
 function getToken() {
   return sessionStorage.getItem('rapidaid_token') || '';
@@ -52,11 +57,37 @@ async function callBridge(action, payload = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, token, payload })
     });
-    return await res.json();
+    const data = await res.json();
+
+    // Session expiry detection for authenticated requests
+    if (token && data && !data.ok && action !== 'login' && action !== 'signup' && action !== 'health') {
+      const errCode = (data.code || data.error || '').toString().toLowerCase();
+      if (errCode === 'not_logged_in' || errCode === 'session_expired' || errCode === 'not logged in') {
+        handleSessionExpired();
+      }
+    }
+
+    return data;
   } catch (err) {
     return { ok: false, error: 'Network error communicating with server: ' + (err.message || err) };
   }
 }
+
+function handleSessionExpired() {
+  sessionStorage.removeItem('rapidaid_token');
+  state.user = null;
+  state.role = null;
+  state.mustChangePassword = false;
+  state.sessionData = null;
+  clearAuthForms();
+  stopAllModules();
+  showAuthView('Your session expired. Please log in again.', 'error');
+}
+
+// Window event listener for CONTRACT E
+window.addEventListener('rapidaid:session-expired', () => {
+  handleSessionExpired();
+});
 
 // ==========================================
 // Public RapidAid Bridge & Module Contracts
@@ -109,41 +140,19 @@ window.RapidAid = {
 
 // Global hook for unit.js
 window.RapidAidApp = {
-  showAuthView
+  showAuthView,
+  clearAuthForms
 };
 
 // ==========================================
-// Tolerant Optional Module Loader
+// Modular Board & Dispatch Lifecycle
 // ==========================================
-function loadOptionalModules() {
-  function appendModuleScript(src) {
-    const s = document.createElement('script');
-    s.src = src;
-    s.async = true;
-    s.onload = () => {
-      if (state.activeSection === 'incidents') {
-        initActiveBoardModules();
-      }
-    };
-    s.onerror = () => {
-      // Tolerantly ignore missing module script
-    };
-    document.head.appendChild(s);
-  }
-
-  appendModuleScript('board.js');
-  appendModuleScript('dispatch.js');
-}
-
 function initActiveBoardModules() {
   const boardMount = document.getElementById('board-mount');
   if (boardMount) {
     if (window.RapidAidBoard && typeof window.RapidAidBoard.init === 'function') {
       if (!boardRunning) {
         boardMount.textContent = '';
-        boardMount.style.padding = '';
-        boardMount.style.color = '';
-        boardMount.style.fontStyle = '';
         try {
           window.RapidAidBoard.init(boardMount);
           boardRunning = true;
@@ -153,9 +162,6 @@ function initActiveBoardModules() {
       }
     } else {
       boardMount.textContent = 'Incident board module not installed';
-      boardMount.style.padding = '12px';
-      boardMount.style.color = '#777';
-      boardMount.style.fontStyle = 'italic';
       boardRunning = false;
     }
   }
@@ -165,9 +171,6 @@ function initActiveBoardModules() {
     if (window.RapidAidDispatch && typeof window.RapidAidDispatch.init === 'function') {
       if (!dispatchRunning) {
         dispatchMount.textContent = '';
-        dispatchMount.style.padding = '';
-        dispatchMount.style.color = '';
-        dispatchMount.style.fontStyle = '';
         try {
           window.RapidAidDispatch.init(dispatchMount);
           dispatchRunning = true;
@@ -177,9 +180,6 @@ function initActiveBoardModules() {
       }
     } else {
       dispatchMount.textContent = 'Dispatch panel not installed';
-      dispatchMount.style.padding = '12px';
-      dispatchMount.style.color = '#777';
-      dispatchMount.style.fontStyle = 'italic';
       dispatchRunning = false;
     }
   }
@@ -216,28 +216,114 @@ function stopBoardModules() {
   }
 }
 
+// Stats & Admin module mounting
+function startStatsModule() {
+  const root = document.getElementById('stats-root');
+  if (!root) return;
+  const mod = window.RapidAidStats || window.Stats;
+  if (mod && !statsRunning) {
+    try {
+      if (typeof mod.mount === 'function') {
+        mod.mount(root);
+        statsRunning = true;
+      } else if (typeof mod.init === 'function') {
+        mod.init(root);
+        statsRunning = true;
+      }
+    } catch (err) {
+      console.error('Error mounting Stats module:', err);
+    }
+  }
+}
+
+function stopStatsModule() {
+  if (statsRunning) {
+    const mod = window.RapidAidStats || window.Stats;
+    if (mod && typeof mod.stop === 'function') {
+      try {
+        mod.stop();
+      } catch (err) {
+        console.error('Error stopping Stats module:', err);
+      }
+    }
+    statsRunning = false;
+  }
+}
+
+function startAdminModule() {
+  const root = document.getElementById('admin-root');
+  if (!root) return;
+  const mod = window.RapidAidAdmin || window.Admin;
+  if (mod && !adminRunning) {
+    try {
+      if (typeof mod.mount === 'function') {
+        mod.mount(root);
+        adminRunning = true;
+      } else if (typeof mod.init === 'function') {
+        mod.init(root);
+        adminRunning = true;
+      }
+    } catch (err) {
+      console.error('Error mounting Admin module:', err);
+    }
+  }
+}
+
+function stopAdminModule() {
+  if (adminRunning) {
+    const mod = window.RapidAidAdmin || window.Admin;
+    if (mod && typeof mod.stop === 'function') {
+      try {
+        mod.stop();
+      } catch (err) {
+        console.error('Error stopping Admin module:', err);
+      }
+    }
+    adminRunning = false;
+  }
+}
+
+function stopAllModules() {
+  stopBoardModules();
+  stopAlertsPolling();
+  stopStatsModule();
+  stopAdminModule();
+  if (window.RapidAidUnit && typeof window.RapidAidUnit.stop === 'function') {
+    try {
+      window.RapidAidUnit.stop();
+    } catch (e) {
+      console.error('Error stopping unit module:', e);
+    }
+  }
+}
+
 // ==========================================
 // 1. Initialization
 // ==========================================
 document.addEventListener('DOMContentLoaded', async () => {
+  initThemeToggle();
+  initProfileMenu();
   initAuthEvents();
   initNavigationEvents();
   initAreaEvents();
-  initIncidentEvents();
   initApiKeyEvents();
   initDispatcherAlertTest();
   checkApiKey();
-  loadOptionalModules();
   updateStatusBanner('Ready');
 
-  // Session check on page load (A2)
+  // Session check on page load
   const token = getToken();
   if (token) {
     const res = await callBridge('session');
     if (res && res.ok) {
       state.user = res.username;
       state.role = res.role;
-      routeByRole(res.role, res);
+      state.sessionData = res;
+      if (res.mustChangePassword) {
+        showChangePasswordView(true);
+      } else {
+        routeByRole(res.role, res);
+      }
     } else {
       sessionStorage.removeItem('rapidaid_token');
       showAuthView();
@@ -251,10 +337,128 @@ function updateStatusBanner(text) {
   const badge = document.getElementById('backend-status');
   if (badge) {
     badge.textContent = 'System: ' + text;
-    badge.style.background = '#d4edda';
-    badge.style.borderColor = '#c3e6cb';
-    badge.style.color = '#155724';
   }
+}
+
+// ==========================================
+// Theme Management
+// ==========================================
+function initThemeToggle() {
+  const toggle = document.getElementById('theme-toggle');
+  const label = document.getElementById('theme-toggle-label');
+  const icon = toggle ? toggle.querySelector('.theme-toggle-icon') : null;
+
+  function updateThemeUI() {
+    const isNight = document.documentElement.dataset.theme === 'night';
+    if (label) label.textContent = isNight ? 'Night' : 'Day';
+    if (icon) icon.textContent = isNight ? '🌙' : '☀';
+  }
+
+  updateThemeUI();
+
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const isNight = document.documentElement.dataset.theme === 'night';
+      if (isNight) {
+        delete document.documentElement.dataset.theme;
+        localStorage.setItem('rapidaid_theme', 'day');
+      } else {
+        document.documentElement.dataset.theme = 'night';
+        localStorage.setItem('rapidaid_theme', 'night');
+      }
+      updateThemeUI();
+    });
+  }
+}
+
+// ==========================================
+// Profile Menu Management
+// ==========================================
+function getInitials(name) {
+  if (!name) return 'RA';
+  const parts = name.trim().split(/[\s_\-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return name.slice(0, 2).toUpperCase();
+}
+
+function updateProfileUI() {
+  const username = state.user || 'Guest';
+  const role = state.role || 'Guest';
+  const initials = getInitials(username);
+
+  const avatarInitials = document.getElementById('profile-avatar-initials');
+  if (avatarInitials) avatarInitials.textContent = initials;
+
+  const profileName = document.getElementById('profile-name');
+  if (profileName) profileName.textContent = username;
+
+  const menuAvatar = document.getElementById('profile-menu-avatar');
+  if (menuAvatar) menuAvatar.textContent = initials;
+
+  const userDisplay = document.getElementById('user-display');
+  if (userDisplay) userDisplay.textContent = username;
+
+  const roleDisplay = document.getElementById('role-display');
+  if (roleDisplay) roleDisplay.textContent = role;
+}
+
+function initProfileMenu() {
+  const toggle = document.getElementById('profile-toggle');
+  const menu = document.getElementById('profile-menu');
+  const btnLogout = document.getElementById('profile-logout');
+  const btnChangePw = document.getElementById('profile-change-password');
+
+  if (toggle && menu) {
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isHidden = menu.hidden;
+      menu.hidden = !isHidden;
+      toggle.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!menu.hidden && !e.target.closest('.profile-wrap')) {
+        menu.hidden = true;
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !menu.hidden) {
+        menu.hidden = true;
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.focus();
+      }
+    });
+  }
+
+  if (btnLogout) {
+    btnLogout.addEventListener('click', () => performLogout());
+  }
+
+  if (btnChangePw) {
+    btnChangePw.addEventListener('click', () => {
+      if (menu) {
+        menu.hidden = true;
+        if (toggle) toggle.setAttribute('aria-expanded', 'false');
+      }
+      showChangePasswordView(false);
+    });
+  }
+}
+
+async function performLogout() {
+  stopAllModules();
+  await callBridge('logout');
+  sessionStorage.removeItem('rapidaid_token');
+  state.user = null;
+  state.role = null;
+  state.mustChangePassword = false;
+  state.sessionData = null;
+  clearAuthForms();
+  showAuthView('Logged out successfully.', 'success');
 }
 
 // ==========================================
@@ -285,16 +489,12 @@ async function checkApiKey() {
     state.cartoApiKey = key;
     if (badge) {
       badge.textContent = 'Configured';
-      badge.style.color = '#28a745';
-      badge.style.fontWeight = 'bold';
     }
-    if (banner) banner.style.display = 'none';
+    if (banner) banner.hidden = true;
   } else {
     state.cartoApiKey = '';
     if (badge) {
       badge.textContent = 'Not Set (Click to configure)';
-      badge.style.color = '#d9534f';
-      badge.style.fontWeight = 'bold';
     }
   }
 
@@ -315,14 +515,14 @@ function initApiKeyEvents() {
   if (btnToggle) {
     btnToggle.addEventListener('click', () => {
       if (banner) {
-        banner.style.display = (banner.style.display === 'none') ? 'block' : 'none';
+        banner.hidden = !banner.hidden;
       }
     });
   }
 
   if (btnDismiss) {
     btnDismiss.addEventListener('click', () => {
-      if (banner) banner.style.display = 'none';
+      if (banner) banner.hidden = true;
     });
   }
 
@@ -330,10 +530,7 @@ function initApiKeyEvents() {
     btnSave.addEventListener('click', () => {
       const key = (input.value || '').trim();
       if (!key) {
-        if (feedback) {
-          feedback.textContent = 'Please enter a valid API key string.';
-          feedback.style.color = '#d9534f';
-        }
+        setFeedback(feedback, 'Please enter a valid API key string.', 'error');
         return;
       }
 
@@ -341,21 +538,13 @@ function initApiKeyEvents() {
       localStorage.setItem('rapidaid_carto_api_key', key);
 
       const badge = document.getElementById('apikey-badge');
-      if (badge) {
-        badge.textContent = 'Configured';
-        badge.style.color = '#28a745';
-        badge.style.fontWeight = 'bold';
-      }
+      if (badge) badge.textContent = 'Configured';
 
-      if (feedback) {
-        feedback.textContent = 'API key saved to private local storage and activated!';
-        feedback.style.color = '#28a745';
-      }
-
+      setFeedback(feedback, 'API key saved to private local storage and activated!', 'success');
       updateTileLayers();
 
       setTimeout(() => {
-        if (banner) banner.style.display = 'none';
+        if (banner) banner.hidden = true;
       }, 1500);
     });
   }
@@ -377,10 +566,7 @@ function initApiKeyEvents() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      if (feedback) {
-        feedback.textContent = 'config.json downloaded! Place it in the project root folder.';
-        feedback.style.color = '#17a2b8';
-      }
+      setFeedback(feedback, 'config.json downloaded! Place it in the project root folder.', 'info');
     });
   }
 }
@@ -393,15 +579,18 @@ function applyTileLayer(mapInstance, tileLayerKey) {
     state[tileLayerKey] = null;
   }
 
-  let tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
+  let tileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  let tileAttribution = '&copy; OpenStreetMap contributors';
   if (state.cartoApiKey) {
+    tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
     tileUrl += `?key=${encodeURIComponent(state.cartoApiKey)}`;
+    tileAttribution += ' &copy; CARTO';
   }
 
   state[tileLayerKey] = L.tileLayer(tileUrl, {
     maxZoom: 19,
     subdomains: 'abcd',
-    attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+    attribution: tileAttribution
   }).addTo(mapInstance);
 }
 
@@ -595,20 +784,16 @@ function initAreaEvents() {
       const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
 
       if (!name) {
-        feedback.textContent = 'Please enter an area name to preview.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, 'Please enter an area name to preview.', 'error');
         return;
       }
 
-      feedback.textContent = 'Geocoding area coordinates & preparing zone preview...';
-      feedback.style.color = '#0056b3';
-
+      setFeedback(feedback, 'Geocoding area coordinates & preparing zone preview...', 'info');
       ensureLeafletMap();
 
       const loc = await callBridge('geocode', { query: name });
       if (!loc || !loc.ok) {
-        feedback.textContent = (loc && loc.error) ? loc.error : 'Location not found for: ' + name;
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, (loc && loc.error) ? loc.error : 'Location not found for: ' + name, 'error');
         return;
       }
 
@@ -622,9 +807,7 @@ function initAreaEvents() {
       document.getElementById('preview-displayname').textContent = loc.displayName;
 
       updateMapVisuals(loc.displayName, loc.lat, loc.lon, radius);
-
-      feedback.textContent = 'Location geocoded! Center marker and radius circle updated.';
-      feedback.style.color = '#28a745';
+      setFeedback(feedback, 'Location geocoded! Center marker and radius circle updated.', 'success');
     });
   }
 
@@ -634,14 +817,11 @@ function initAreaEvents() {
       const radius = parseInt(document.getElementById('area-radius').value, 10) || 3000;
 
       if (!name) {
-        feedback.textContent = 'Please specify an operational area name.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, 'Please specify an operational area name.', 'error');
         return;
       }
 
-      feedback.textContent = 'Generating road network and emergency facilities via pipeline...';
-      feedback.style.color = '#0056b3';
-
+      setFeedback(feedback, 'Generating road network and emergency facilities via pipeline...', 'info');
       ensureLeafletMap();
 
       let lat = state.centerLat;
@@ -651,8 +831,7 @@ function initAreaEvents() {
       if (state.lastGeocodedName !== name) {
         const loc = await callBridge('geocode', { query: name });
         if (!loc || !loc.ok) {
-          feedback.textContent = (loc && loc.error) ? loc.error : 'Location not found for: ' + name;
-          feedback.style.color = '#d9534f';
+          setFeedback(feedback, (loc && loc.error) ? loc.error : 'Location not found for: ' + name, 'error');
           return;
         }
         lat = loc.lat;
@@ -696,7 +875,8 @@ function initAreaEvents() {
           renderGeoJsonOnMap(state.boardMap, roads, places, state.boardLayers);
         }
 
-        document.getElementById('area-stats-box').style.display = 'block';
+        const statsBox = document.getElementById('area-stats-box');
+        if (statsBox) statsBox.hidden = false;
         document.getElementById('stat-nodes').textContent = pipeData.nodesCount != null ? pipeData.nodesCount : 0;
         document.getElementById('stat-edges').textContent = pipeData.edgesCount != null ? pipeData.edgesCount : 0;
         document.getElementById('stat-places').textContent = pipeData.placesCount != null ? pipeData.placesCount : 0;
@@ -704,27 +884,42 @@ function initAreaEvents() {
         if (pipeData.roadsFile) document.getElementById('stat-roads-file').textContent = pipeData.roadsFile;
         if (pipeData.placesFile) document.getElementById('stat-places-file').textContent = pipeData.placesFile;
 
-        feedback.textContent = `Success! Operational zone pipeline completed.\n${pipeData.placesCount} facilities snapped to ${pipeData.edgesCount} road edges.`;
-        feedback.style.color = '#28a745';
+        setFeedback(feedback, `Success! Operational zone pipeline completed.\n${pipeData.placesCount} facilities snapped to ${pipeData.edgesCount} road edges.`, 'success');
 
         const areaAlert = document.getElementById('area-alert');
-        if (areaAlert) areaAlert.style.display = 'none';
+        if (areaAlert) areaAlert.hidden = true;
       } else {
-        feedback.textContent = (pipeData && pipeData.error) ? pipeData.error : 'Pipeline generation failed.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, (pipeData && pipeData.error) ? pipeData.error : 'Pipeline generation failed.', 'error');
       }
     });
   }
 }
 
 // ==========================================
-// 5. Authentication & Routing
+// 5. Authentication, Forms & Routing
 // ==========================================
+function clearAuthForms() {
+  const ids = [
+    'login-username',
+    'login-password',
+    'signup-username',
+    'signup-password',
+    'change-old-password',
+    'change-new-password',
+    'change-confirm-password'
+  ];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+}
+
 function initAuthEvents() {
   const tabLogin = document.getElementById('tab-login');
   const tabSignup = document.getElementById('tab-signup');
   const loginContainer = document.getElementById('login-container');
   const signupContainer = document.getElementById('signup-container');
+  const changePasswordContainer = document.getElementById('change-password-container');
   const roleSelect = document.getElementById('signup-role');
   const unitFields = document.getElementById('signup-unit-fields');
   const kindSelect = document.getElementById('signup-unit-kind');
@@ -732,24 +927,26 @@ function initAuthEvents() {
   const countLabel = document.getElementById('signup-unit-count-label');
 
   tabLogin.addEventListener('click', () => {
-    tabLogin.style.fontWeight = 'bold';
-    tabSignup.style.fontWeight = 'normal';
-    loginContainer.style.display = 'block';
-    signupContainer.style.display = 'none';
-    showAuthFeedback('', '');
+    tabLogin.classList.add('active');
+    tabSignup.classList.remove('active');
+    loginContainer.hidden = false;
+    signupContainer.hidden = true;
+    if (changePasswordContainer) changePasswordContainer.hidden = true;
+    showAuthFeedback('');
   });
 
   tabSignup.addEventListener('click', () => {
-    tabSignup.style.fontWeight = 'bold';
-    tabLogin.style.fontWeight = 'normal';
-    signupContainer.style.display = 'block';
-    loginContainer.style.display = 'none';
-    showAuthFeedback('', '');
+    tabSignup.classList.add('active');
+    tabLogin.classList.remove('active');
+    signupContainer.hidden = false;
+    loginContainer.hidden = true;
+    if (changePasswordContainer) changePasswordContainer.hidden = true;
+    showAuthFeedback('');
   });
 
   if (roleSelect && unitFields) {
     roleSelect.addEventListener('change', () => {
-      unitFields.style.display = (roleSelect.value === 'unit') ? 'block' : 'none';
+      unitFields.hidden = (roleSelect.value !== 'unit');
     });
   }
 
@@ -757,138 +954,341 @@ function initAuthEvents() {
     kindSelect.addEventListener('change', () => {
       const k = kindSelect.value;
       if (k === 'ambulance') {
-        countContainer.style.display = 'block';
+        countContainer.hidden = false;
         countLabel.textContent = 'Paramedics:';
       } else if (k === 'fire_truck') {
-        countContainer.style.display = 'block';
+        countContainer.hidden = false;
         countLabel.textContent = 'Water Litres:';
       } else if (k === 'police_unit') {
-        countContainer.style.display = 'block';
+        countContainer.hidden = false;
         countLabel.textContent = 'Officers:';
       } else if (k === 'hospital') {
-        countContainer.style.display = 'block';
+        countContainer.hidden = false;
         countLabel.textContent = 'Total Beds:';
       } else if (k === 'shelter') {
-        countContainer.style.display = 'block';
+        countContainer.hidden = false;
         countLabel.textContent = 'Capacity:';
       } else {
-        countContainer.style.display = 'none';
+        countContainer.hidden = true;
       }
     });
   }
 
-  document.getElementById('btn-login').addEventListener('click', async () => {
-    const u = document.getElementById('login-username').value.trim();
-    const p = document.getElementById('login-password').value;
+  // Login form submit handler
+  const formLogin = document.getElementById('form-login');
+  if (formLogin) {
+    formLogin.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const u = document.getElementById('login-username').value.trim();
+      const p = document.getElementById('login-password').value;
 
-    if (!u || !p) {
-      showAuthFeedback('Please enter both username and password.', '#d9534f');
-      return;
-    }
-
-    const res = await callBridge('login', { username: u, password: p });
-    if (res && res.ok) {
-      sessionStorage.setItem('rapidaid_token', res.token);
-      state.user = res.username;
-      state.role = res.role;
-      showAuthFeedback('Login successful!', '#28a745');
-      routeByRole(res.role, res);
-    } else {
-      showAuthFeedback((res && res.error) ? res.error : 'Invalid username or password', '#d9534f');
-    }
-  });
-
-  document.getElementById('btn-signup').addEventListener('click', async () => {
-    const u = document.getElementById('signup-username').value.trim();
-    const p = document.getElementById('signup-password').value;
-    const r = document.getElementById('signup-role').value;
-
-    if (!u || !p) {
-      showAuthFeedback('Please provide a username and password.', '#d9534f');
-      return;
-    }
-
-    const payload = { username: u, password: p, role: r };
-
-    if (r === 'unit') {
-      const kind = document.getElementById('signup-unit-kind').value;
-      const name = document.getElementById('signup-unit-name').value.trim();
-      const lat = parseFloat(document.getElementById('signup-unit-lat').value);
-      const lon = parseFloat(document.getElementById('signup-unit-lon').value);
-      const countVal = parseInt(document.getElementById('signup-unit-count').value, 10) || 0;
-
-      if (!name) {
-        showAuthFeedback('Please enter a display name for the unit.', '#d9534f');
-        return;
-      }
-      if (isNaN(lat) || isNaN(lon)) {
-        showAuthFeedback('Please enter valid coordinates.', '#d9534f');
+      if (!u || !p) {
+        showAuthFeedback('Please enter both username and password.', 'error');
         return;
       }
 
-      payload.unit = {
-        kind,
-        name,
-        lat,
-        lon,
-        count: countVal
-      };
-    }
+      const res = await callBridge('login', { username: u, password: p });
+      if (res && res.ok) {
+        sessionStorage.setItem('rapidaid_token', res.token);
+        state.user = res.username;
+        state.role = res.role;
+        clearAuthForms();
 
-    const res = await callBridge('signup', payload);
-    if (res && res.ok) {
-      showAuthFeedback(`Account created for ${u}! Please log in.`, '#28a745');
-      tabLogin.click();
-      document.getElementById('login-username').value = u;
-      document.getElementById('login-password').value = '';
-    } else {
-      showAuthFeedback((res && res.error) ? res.error : 'Registration failed.', '#d9534f');
-    }
-  });
-}
+        if (res.mustChangePassword) {
+          state.sessionData = res;
+          showChangePasswordView(true);
+          return;
+        }
 
-function showAuthFeedback(msg, color) {
-  const el = document.getElementById('auth-feedback');
-  if (el) {
-    el.textContent = msg;
-    el.style.color = color;
+        showAuthFeedback('Login successful!', 'success');
+        routeByRole(res.role, res);
+      } else {
+        const code = (res && (res.code || res.error || '')).toString().toLowerCase();
+        if (code.includes('locked')) {
+          const n = (res && (res.lockoutSeconds || res.retryAfter || res.seconds)) || 30;
+          showAuthFeedback(`Too many attempts. Try again in ${n} seconds.`, 'error');
+        } else if (code.includes('account_pending')) {
+          showAuthFeedback((res && res.message) || (res && res.error) || 'Account pending approval.', 'error');
+        } else if (code.includes('account_disabled')) {
+          showAuthFeedback((res && res.message) || (res && res.error) || 'Account disabled.', 'error');
+        } else {
+          showAuthFeedback((res && res.error) ? res.error : 'Invalid username or password', 'error');
+        }
+      }
+    });
+  }
+
+  // Signup form submit handler
+  const formSignup = document.getElementById('form-signup');
+  if (formSignup) {
+    formSignup.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const u = document.getElementById('signup-username').value.trim();
+      const p = document.getElementById('signup-password').value;
+      const r = document.getElementById('signup-role').value;
+
+      if (!u || !p) {
+        showAuthFeedback('Please provide a username and password.', 'error');
+        return;
+      }
+
+      const payload = { username: u, password: p, role: r };
+
+      if (r === 'unit') {
+        const kind = document.getElementById('signup-unit-kind').value;
+        const name = document.getElementById('signup-unit-name').value.trim();
+        const lat = parseFloat(document.getElementById('signup-unit-lat').value);
+        const lon = parseFloat(document.getElementById('signup-unit-lon').value);
+        const countVal = parseInt(document.getElementById('signup-unit-count').value, 10) || 0;
+
+        if (!name) {
+          showAuthFeedback('Please enter a display name for the unit.', 'error');
+          return;
+        }
+        if (isNaN(lat) || isNaN(lon)) {
+          showAuthFeedback('Please enter valid coordinates.', 'error');
+          return;
+        }
+
+        payload.unit = {
+          kind,
+          name,
+          lat,
+          lon,
+          count: countVal
+        };
+      }
+
+      const res = await callBridge('signup', payload);
+      if (res && res.ok) {
+        clearAuthForms();
+        let successMsg = `Account created for ${u}! Please log in.`;
+        if (res.pending === true) {
+          successMsg = 'Account created. An administrator must approve it before you can log in.';
+        }
+        tabLogin.click();
+        showAuthFeedback(successMsg, 'success');
+      } else {
+        showAuthFeedback((res && res.error) ? res.error : 'Registration failed.', 'error');
+      }
+    });
+  }
+
+  // Change password form submit handler
+  const formChangePassword = document.getElementById('form-change-password');
+  if (formChangePassword) {
+    formChangePassword.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const oldP = (document.getElementById('change-old-password').value || '');
+      const newP = (document.getElementById('change-new-password').value || '');
+      const confP = (document.getElementById('change-confirm-password').value || '');
+      const feedback = document.getElementById('change-password-feedback');
+
+      if (!oldP) {
+        setFeedback(feedback, 'Please enter your current password.', 'error');
+        return;
+      }
+      if (newP.length < 10 || newP.length > 128) {
+        setFeedback(feedback, 'Password must be between 10 and 128 characters.', 'error');
+        return;
+      }
+      if (newP !== confP) {
+        setFeedback(feedback, 'New passwords do not match.', 'error');
+        return;
+      }
+
+      setFeedback(feedback, 'Updating password...', 'info');
+
+      const res = await callBridge('change_password', {
+        oldPassword: oldP,
+        newPassword: newP,
+        confirmPassword: confP,
+        old_password: oldP,
+        new_password: newP
+      });
+
+      if (res && res.ok) {
+        const msg = res.message || 'Password changed successfully!';
+        setFeedback(feedback, msg, 'success');
+        clearAuthForms();
+
+        if (state.mustChangePassword) {
+          state.mustChangePassword = false;
+          setTimeout(() => {
+            if (state.role) {
+              routeByRole(state.role, state.sessionData || {});
+            } else {
+              showAuthView('Password changed successfully. Please log in with your new password.', 'success');
+            }
+          }, 800);
+        } else {
+          setTimeout(() => {
+            if (state.role === 'unit') {
+              document.getElementById('auth-view').hidden = true;
+              document.getElementById('unit-view').hidden = false;
+            } else if (state.role) {
+              document.getElementById('auth-view').hidden = true;
+              document.getElementById('app-view').hidden = false;
+              const mainNav = document.getElementById('main-nav');
+              if (mainNav) {
+                mainNav.hidden = false;
+                mainNav.style.display = 'flex';
+              }
+              showSection(state.previousSection || 'incidents');
+            }
+          }, 800);
+        }
+      } else {
+        const err = (res && res.error) || (res && res.message) || 'Failed to change password.';
+        setFeedback(feedback, err, 'error');
+      }
+    });
+  }
+
+  const btnCancelChange = document.getElementById('btn-cancel-change-password');
+  if (btnCancelChange) {
+    btnCancelChange.addEventListener('click', () => {
+      clearAuthForms();
+      if (state.role === 'unit') {
+        document.getElementById('auth-view').hidden = true;
+        document.getElementById('unit-view').hidden = false;
+      } else if (state.role) {
+        document.getElementById('auth-view').hidden = true;
+        document.getElementById('app-view').hidden = false;
+        const mainNav = document.getElementById('main-nav');
+        if (mainNav) {
+          mainNav.hidden = false;
+          mainNav.style.display = 'flex';
+        }
+        showSection(state.previousSection || 'incidents');
+      } else {
+        showAuthView();
+      }
+    });
   }
 }
 
-function showAuthView(msg = '') {
-  stopBoardModules();
-  document.getElementById('auth-view').style.display = 'block';
-  document.getElementById('app-view').style.display = 'none';
-  document.getElementById('main-nav').style.display = 'none';
-  document.getElementById('session-info').style.display = 'none';
-  document.getElementById('unit-view').style.display = 'none';
-  const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
-  if (apiKeyBtn) apiKeyBtn.style.display = 'inline-block';
-  if (msg) showAuthFeedback(msg, '#28a745');
+function showChangePasswordView(isForced) {
+  state.mustChangePassword = isForced;
+  const authTabs = document.getElementById('auth-tabs-bar');
+  const loginCont = document.getElementById('login-container');
+  const signupCont = document.getElementById('signup-container');
+  const changeCont = document.getElementById('change-password-container');
+  const heading = document.getElementById('change-password-heading');
+  const desc = document.getElementById('change-password-desc');
+  const cancelBtn = document.getElementById('btn-cancel-change-password');
+  const feedback = document.getElementById('change-password-feedback');
+
+  if (feedback) {
+    feedback.textContent = '';
+    feedback.className = 'form-feedback';
+  }
+
+  document.getElementById('auth-view').hidden = false;
+  document.getElementById('app-view').hidden = true;
+  document.getElementById('unit-view').hidden = true;
+
+  if (isForced) {
+    const mainNav = document.getElementById('main-nav');
+    if (mainNav) {
+      mainNav.hidden = true;
+      mainNav.style.display = 'none';
+    }
+    if (authTabs) authTabs.hidden = true;
+    if (loginCont) loginCont.hidden = true;
+    if (signupCont) signupCont.hidden = true;
+    if (changeCont) changeCont.hidden = false;
+    if (heading) heading.textContent = 'Change Password Required';
+    if (desc) desc.textContent = 'You must change your password before continuing.';
+    if (cancelBtn) cancelBtn.hidden = true;
+  } else {
+    state.previousSection = state.activeSection;
+    if (authTabs) authTabs.hidden = true;
+    if (loginCont) loginCont.hidden = true;
+    if (signupCont) signupCont.hidden = true;
+    if (changeCont) changeCont.hidden = false;
+    if (heading) heading.textContent = 'Change Password';
+    if (desc) desc.textContent = 'Enter your current password and choose a new password.';
+    if (cancelBtn) cancelBtn.hidden = false;
+  }
 }
 
-function routeByRole(role, sessionData) {
-  document.getElementById('auth-view').style.display = 'none';
+function setFeedback(el, msg, type = '') {
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'form-feedback';
+  if (type === 'success') {
+    el.classList.add('form-success');
+  } else if (type === 'error') {
+    el.classList.add('form-error');
+  }
+}
+
+function showAuthFeedback(msg, type = '') {
+  const el = document.getElementById('auth-feedback');
+  setFeedback(el, msg, type);
+}
+
+function showAuthView(msg = '', type = 'info') {
+  stopAllModules();
+  document.getElementById('auth-view').hidden = false;
+  document.getElementById('app-view').hidden = true;
+  document.getElementById('unit-view').hidden = true;
+
+  const mainNav = document.getElementById('main-nav');
+  if (mainNav) {
+    mainNav.hidden = true;
+    mainNav.style.display = 'none';
+  }
+
+  const authTabs = document.getElementById('auth-tabs-bar');
+  if (authTabs) authTabs.hidden = false;
+
+  const tabLogin = document.getElementById('tab-login');
+  if (tabLogin) tabLogin.click();
+
+  const changeCont = document.getElementById('change-password-container');
+  if (changeCont) changeCont.hidden = true;
+
+  const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
+  if (apiKeyBtn) apiKeyBtn.hidden = false;
+
+  updateProfileUI();
+  if (msg) showAuthFeedback(msg, type);
+}
+
+function routeByRole(role, sessionData = {}) {
+  document.getElementById('auth-view').hidden = true;
+  updateProfileUI();
 
   if (role === 'unit') {
-    document.getElementById('main-nav').style.display = 'none';
-    document.getElementById('app-view').style.display = 'none';
-    document.getElementById('session-info').style.display = 'none';
+    const mainNav = document.getElementById('main-nav');
+    if (mainNav) {
+      mainNav.hidden = true;
+      mainNav.style.display = 'none';
+    }
+    document.getElementById('app-view').hidden = true;
     const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
-    if (apiKeyBtn) apiKeyBtn.style.display = 'none';
+    if (apiKeyBtn) apiKeyBtn.hidden = true;
     const apiKeyBanner = document.getElementById('apikey-banner');
-    if (apiKeyBanner) apiKeyBanner.style.display = 'none';
+    if (apiKeyBanner) apiKeyBanner.hidden = true;
 
     stopBoardModules();
     stopAlertsPolling();
-    window.RapidAidUnit.init(state.user, sessionData.unit);
+    stopStatsModule();
+    stopAdminModule();
+    if (window.RapidAidUnit && typeof window.RapidAidUnit.init === 'function') {
+      window.RapidAidUnit.init(state.user, sessionData.unit);
+    }
   } else {
     const unitView = document.getElementById('unit-view');
-    if (unitView) unitView.style.display = 'none';
-    if (window.RapidAidUnit) window.RapidAidUnit.stop();
+    if (unitView) unitView.hidden = true;
+    if (window.RapidAidUnit && typeof window.RapidAidUnit.stop === 'function') {
+      window.RapidAidUnit.stop();
+    }
 
     const apiKeyBtn = document.getElementById('btn-toggle-apikey-settings');
-    if (apiKeyBtn) apiKeyBtn.style.display = 'inline-block';
+    if (apiKeyBtn) apiKeyBtn.hidden = false;
 
     onLoginSuccess();
   }
@@ -900,23 +1300,31 @@ async function checkAreaStatusAndRoute() {
     state.hasGeoJson = true;
     showSection('incidents');
     const areaAlert = document.getElementById('area-alert');
-    if (areaAlert) areaAlert.style.display = 'none';
+    if (areaAlert) areaAlert.hidden = true;
     await window.RapidAid.reloadLayers();
   } else {
     state.hasGeoJson = false;
     showSection('area');
     const areaAlert = document.getElementById('area-alert');
-    if (areaAlert) areaAlert.style.display = 'block';
+    if (areaAlert) areaAlert.hidden = false;
   }
 }
 
 async function onLoginSuccess() {
-  document.getElementById('app-view').style.display = 'block';
-  document.getElementById('main-nav').style.display = 'block';
-  document.getElementById('session-info').style.display = 'inline';
-  document.getElementById('user-display').textContent = state.user;
-  document.getElementById('role-display').textContent = state.role;
+  document.getElementById('app-view').hidden = false;
+  const mainNav = document.getElementById('main-nav');
+  if (mainNav) {
+    mainNav.hidden = false;
+    mainNav.style.display = 'flex';
+  }
 
+  // Admin section nav visibility
+  const navUsers = document.getElementById('nav-users');
+  if (navUsers) {
+    navUsers.hidden = (state.role !== 'admin');
+  }
+
+  updateProfileUI();
   await checkAreaStatusAndRoute();
 }
 
@@ -927,38 +1335,49 @@ function initNavigationEvents() {
   const navIncidents = document.getElementById('nav-incidents');
   const navArea = document.getElementById('nav-area');
   const navStats = document.getElementById('nav-stats');
+  const navUsers = document.getElementById('nav-users');
   const navLogout = document.getElementById('nav-logout');
 
-  navIncidents.addEventListener('click', () => showSection('incidents'));
-  navArea.addEventListener('click', () => showSection('area'));
-  navStats.addEventListener('click', () => showSection('stats'));
-
-  navLogout.addEventListener('click', async () => {
-    stopBoardModules();
-    await callBridge('logout');
-    sessionStorage.removeItem('rapidaid_token');
-    state.user = null;
-    state.role = null;
-    stopAlertsPolling();
-    showAuthView('Logged out successfully.');
-  });
+  if (navIncidents) navIncidents.addEventListener('click', () => showSection('incidents'));
+  if (navArea) navArea.addEventListener('click', () => showSection('area'));
+  if (navStats) navStats.addEventListener('click', () => showSection('stats'));
+  if (navUsers) navUsers.addEventListener('click', () => showSection('admin'));
+  if (navLogout) navLogout.addEventListener('click', () => performLogout());
 }
 
 function showSection(sectionId) {
+  if (sectionId === 'admin' && state.role !== 'admin') {
+    sectionId = 'incidents';
+  }
+
   const prevSection = state.activeSection;
   state.activeSection = sectionId;
 
-  const sections = ['area', 'incidents', 'stats'];
-  sections.forEach(s => {
-    const el = document.getElementById('section-' + s);
-    const nav = document.getElementById('nav-' + s);
-    if (el) el.style.display = (s === sectionId) ? 'block' : 'none';
-    if (nav) nav.style.fontWeight = (s === sectionId) ? 'bold' : 'normal';
-  });
-
   if (prevSection === 'incidents' && sectionId !== 'incidents') {
     stopBoardModules();
+    stopAlertsPolling();
+  } else if (prevSection === 'stats' && sectionId !== 'stats') {
+    stopStatsModule();
+  } else if (prevSection === 'admin' && sectionId !== 'admin') {
+    stopAdminModule();
   }
+
+  const sections = ['area', 'incidents', 'stats', 'admin'];
+  sections.forEach(s => {
+    const el = document.getElementById('section-' + s);
+    const nav = document.getElementById(s === 'admin' ? 'nav-users' : ('nav-' + s));
+    const isActive = (s === sectionId);
+    if (el) {
+      el.hidden = !isActive;
+    }
+    if (nav) {
+      if (isActive) {
+        nav.setAttribute('aria-current', 'page');
+      } else {
+        nav.removeAttribute('aria-current');
+      }
+    }
+  });
 
   if (sectionId === 'area') {
     ensureLeafletMap();
@@ -969,10 +1388,10 @@ function showSection(sectionId) {
     startBoardModules();
     startAlertsPolling();
     refreshUnitSelect();
-  }
-
-  if (sectionId !== 'incidents') {
-    stopAlertsPolling();
+  } else if (sectionId === 'stats') {
+    startStatsModule();
+  } else if (sectionId === 'admin') {
+    startAdminModule();
   }
 }
 
@@ -1001,18 +1420,15 @@ function initDispatcherAlertTest() {
       const feedback = document.getElementById('alert-send-feedback');
 
       if (!toUser) {
-        feedback.textContent = 'Please select a recipient unit.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, 'Please select a recipient unit.', 'error');
         return;
       }
       if (!location) {
-        feedback.textContent = 'Please specify an incident location.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, 'Please specify an incident location.', 'error');
         return;
       }
 
-      feedback.textContent = 'Dispatching alert...';
-      feedback.style.color = '#0056b3';
+      setFeedback(feedback, 'Dispatching alert...', 'info');
 
       const payload = {
         toUser,
@@ -1027,12 +1443,10 @@ function initDispatcherAlertTest() {
 
       const res = await callBridge('send_test_alert', payload);
       if (res && res.ok) {
-        feedback.textContent = `Alert #${res.alertId} dispatched successfully to ${toUser}!`;
-        feedback.style.color = '#28a745';
+        setFeedback(feedback, `Alert #${res.alertId} dispatched successfully to ${toUser}!`, 'success');
         refreshAlertsTable();
       } else {
-        feedback.textContent = (res && res.error) ? res.error : 'Failed to dispatch alert.';
-        feedback.style.color = '#d9534f';
+        setFeedback(feedback, (res && res.error) ? res.error : 'Failed to dispatch alert.', 'error');
       }
     });
   }
@@ -1071,36 +1485,25 @@ async function refreshAlertsTable() {
     const list = [...res.alerts].reverse();
     list.forEach(a => {
       const tr = document.createElement('tr');
-      tr.style.borderBottom = '1px solid #ddd';
 
       const tdId = document.createElement('td');
-      tdId.style.padding = '8px';
       tdId.textContent = `#${a.id}`;
 
       const tdUnit = document.createElement('td');
-      tdUnit.style.padding = '8px';
-      tdUnit.textContent = a.toUser;
+      tdUnit.textContent = a.toUser || '';
 
       const tdType = document.createElement('td');
-      tdType.style.padding = '8px';
-      tdType.textContent = a.type;
+      tdType.textContent = a.type || '';
 
       const tdSev = document.createElement('td');
-      tdSev.style.padding = '8px';
       tdSev.textContent = `${a.severity}/5`;
 
       const tdState = document.createElement('td');
-      tdState.style.padding = '8px';
-      tdState.textContent = a.state;
-      tdState.style.fontWeight = 'bold';
-      tdState.style.color = (a.state === 'Cleared') ? '#28a745' :
-                            (a.state === 'Pending') ? '#ffc107' :
-                            (a.state === 'Declined') ? '#6c757d' : '#0066cc';
+      tdState.textContent = a.state || '';
 
       const tdTime = document.createElement('td');
-      tdTime.style.padding = '8px';
-      const d = new Date(a.createdAt * 1000);
-      tdTime.textContent = d.toLocaleTimeString();
+      const d = new Date((a.createdAt || 0) * 1000);
+      tdTime.textContent = isNaN(d.getTime()) ? '' : d.toLocaleTimeString();
 
       tr.appendChild(tdId);
       tr.appendChild(tdUnit);
@@ -1114,9 +1517,6 @@ async function refreshAlertsTable() {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = 6;
-    td.style.padding = '12px';
-    td.style.textAlign = 'center';
-    td.style.color = '#777';
     td.textContent = 'No dispatch alerts recorded yet.';
     tr.appendChild(td);
     tbody.appendChild(tr);
@@ -1134,11 +1534,4 @@ function stopAlertsPolling() {
     clearInterval(dispatcherAlertsTimer);
     dispatcherAlertsTimer = null;
   }
-}
-
-// ==========================================
-// 8. Incident Event Compatibility Stub
-// ==========================================
-function initIncidentEvents() {
-  // Retained for backward compatibility
 }

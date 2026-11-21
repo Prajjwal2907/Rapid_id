@@ -2,153 +2,219 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RapidAid - Emergency Dispatch System</title>
-  <!-- Leaflet Map Integration -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/style.css?v=3">
+  <link rel="stylesheet" href="/modules.css">
+  <script src="/theme.js"></script>
 </head>
-<body style="font-family: sans-serif; margin: 20px; line-height: 1.5;">
+<body>
 
   <!-- Header & Navigation -->
-  <header style="border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px;">
-    <h1 style="margin: 0 0 10px 0;">RapidAid Emergency Dispatch System</h1>
-    <div id="header-bar" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-      <div>
-        <span id="backend-status" style="padding: 3px 8px; background: #eee; border: 1px solid #ccc; font-size: 13px;">Checking backend...</span>
-        <button id="btn-toggle-apikey-settings" style="margin-left: 8px; font-size: 12px; padding: 3px 8px; cursor: pointer;">Map API Key: <span id="apikey-badge">Checking...</span></button>
-        <span id="session-info" style="margin-left: 15px; font-weight: bold; display: none;">
-          Logged in as: <span id="user-display"></span> (<span id="role-display"></span>)
-        </span>
+  <header>
+    <div class="header-top">
+      <div class="brand-lockup">
+        <img class="brand-logo" src="/assets/logo.png" alt="Rapid Aid logo">
+        <div class="brand-copy">
+          <strong>Rapid Aid</strong>
+          <span>Emergency Dispatch &amp; Response System</span>
+        </div>
       </div>
-      <nav id="main-nav" style="display: none; margin-top: 5px;">
-        <button id="nav-incidents" style="margin-right: 8px; font-weight: bold;">Incident Reports</button>
-        <button id="nav-area" style="margin-right: 8px;">Area Map Setup</button>
-        <button id="nav-stats" style="margin-right: 8px;">Past Dispatch Stats</button>
-        <button id="nav-logout" style="background: #fee; border-color: #c00;">Logout</button>
+      <div class="header-tools">
+        <span id="backend-status">Checking backend...</span>
+        <button id="btn-toggle-apikey-settings" type="button">Map API Key: <span id="apikey-badge">Checking...</span></button>
+        <button id="theme-toggle" type="button" title="Toggle color theme">
+          <span class="theme-toggle-icon">☀</span>
+          <span id="theme-toggle-label">Day</span>
+        </button>
+        <div class="profile-wrap">
+          <button id="profile-toggle" type="button" aria-expanded="false" aria-haspopup="true">
+            <span class="profile-avatar" id="profile-avatar-initials">RA</span>
+            <span class="profile-toggle-copy">
+              <span class="profile-section-label">Account</span>
+              <span id="profile-name">Guest</span>
+            </span>
+            <span class="profile-chevron">▼</span>
+          </button>
+          <div id="profile-menu" class="profile-menu" hidden>
+            <div class="profile-card-head">
+              <span class="profile-avatar profile-avatar-large" id="profile-menu-avatar">RA</span>
+              <div class="profile-card-identity">
+                <span id="user-display">Guest</span>
+                <span id="role-display">Role</span>
+              </div>
+            </div>
+            <div class="profile-meta">
+              <span>Status</span>
+              <strong>Active</strong>
+            </div>
+            <button id="profile-change-password" type="button">Change Password</button>
+            <button id="profile-logout" type="button">Logout</button>
+          </div>
+        </div>
+        <span id="session-info" hidden></span>
+      </div>
+    </div>
+    <div id="header-bar">
+      <nav id="main-nav" hidden>
+        <span class="nav-caption">Dispatch</span>
+        <button id="nav-incidents" type="button"><span class="nav-icon">🚨</span><span>Incidents</span></button>
+        <button id="nav-area" type="button"><span class="nav-icon">🗺</span><span>Area</span></button>
+        <button id="nav-stats" type="button"><span class="nav-icon">📊</span><span>Stats</span></button>
+        <button id="nav-users" type="button" hidden><span class="nav-icon">👥</span><span>Users</span></button>
+        <div class="nav-spacer"></div>
+        <button id="nav-logout" type="button"><span class="nav-icon">🚪</span><span>Logout</span></button>
       </nav>
     </div>
   </header>
 
   <!-- API Key Setup Banner / Dialog -->
-  <div id="apikey-banner" style="display: none; background: #eef5fc; border: 2px solid #3366cc; border-radius: 4px; padding: 15px; margin-bottom: 20px;">
-    <h3 style="margin-top: 0; color: #003366;">Map Service CARTO API Key Setup</h3>
-    <p style="margin: 5px 0 10px 0;">
+  <div id="apikey-banner" hidden>
+    <h3>Map Service CARTO API Key Setup</h3>
+    <p>
       A CARTO API key is required to stream live map tiles. When entered, it is saved privately to your local storage and ignored by git (see <code>config.example.json</code>).
     </p>
-    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-      <input type="text" id="apikey-input" placeholder="Paste your CARTO API Key here" style="flex: 1; min-width: 260px; padding: 8px; box-sizing: border-box;">
-      <button id="btn-save-apikey" style="padding: 8px 18px; font-weight: bold; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Save API Key</button>
-      <button id="btn-download-config" style="padding: 8px 14px; background: #17a2b8; color: white; border: none; border-radius: 3px; cursor: pointer;">Save to config.json</button>
-      <button id="btn-dismiss-apikey" style="padding: 8px 12px; background: #e2e6ea; border: 1px solid #ccc; border-radius: 3px; cursor: pointer;">Hide</button>
+    <div class="api-key-row">
+      <input type="text" id="apikey-input" placeholder="Paste your CARTO API Key here" autocomplete="off">
+      <button id="btn-save-apikey" type="button">Save API Key</button>
+      <button id="btn-download-config" type="button">Save to config.json</button>
+      <button id="btn-dismiss-apikey" type="button">Hide</button>
     </div>
-    <div id="apikey-feedback" style="margin-top: 8px; font-weight: bold; font-size: 13px;"></div>
+    <div id="apikey-feedback" role="status" aria-live="polite"></div>
   </div>
 
   <!-- ========================================== -->
   <!-- 1. Authentication View (Login / Signup)    -->
   <!-- ========================================== -->
-  <main id="auth-view" style="max-width: 480px; margin: 40px auto; border: 1px solid #ccc; padding: 25px;">
-    <h2 style="margin-top: 0;">RapidAid Access Portal</h2>
-    <div style="margin-bottom: 15px;">
-      <button id="tab-login" style="padding: 8px 16px; font-weight: bold;">Login</button>
-      <button id="tab-signup" style="padding: 8px 16px;">Sign Up</button>
+  <main id="auth-view">
+    <div class="auth-logo-wrap">
+      <img class="auth-logo" src="/assets/logo.png" alt="Rapid Aid logo">
+    </div>
+    <h2>RapidAid Access Portal</h2>
+    <div class="auth-tabs" id="auth-tabs-bar">
+      <button id="tab-login" type="button" class="active">Login</button>
+      <button id="tab-signup" type="button">Sign Up</button>
     </div>
 
     <!-- Login Form -->
     <div id="login-container">
       <h3>System Login</h3>
-      <form id="form-login" onsubmit="return false;">
+      <form id="form-login">
         <p>
-          <label for="login-username">Username:</label><br>
-          <input type="text" id="login-username" value="admin" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+          <label for="login-username">Username:</label>
+          <input type="text" id="login-username" autocomplete="username" required>
         </p>
         <p>
-          <label for="login-password">Password:</label><br>
-          <input type="password" id="login-password" value="admin123" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+          <label for="login-password">Password:</label>
+          <input type="password" id="login-password" autocomplete="current-password" required>
         </p>
         <p>
-          <button id="btn-login" style="padding: 8px 20px; font-size: 15px;">Log In</button>
-        </p>
-        <p style="font-size: 12px; color: #666;">
-          Default credentials: <b>admin</b> / <b>admin123</b>
+          <button id="btn-login" type="submit">Log In</button>
         </p>
       </form>
     </div>
 
     <!-- Signup Form -->
-    <div id="signup-container" style="display: none;">
+    <div id="signup-container" hidden>
       <h3>Register New Account</h3>
-      <form id="form-signup" onsubmit="return false;">
+      <form id="form-signup">
         <p>
-          <label for="signup-username">New Username:</label><br>
-          <input type="text" id="signup-username" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+          <label for="signup-username">New Username:</label>
+          <input type="text" id="signup-username" autocomplete="username" required>
         </p>
         <p>
-          <label for="signup-password">New Password:</label><br>
-          <input type="password" id="signup-password" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
+          <label for="signup-password">New Password:</label>
+          <input type="password" id="signup-password" autocomplete="new-password" required>
         </p>
         <p>
-          <label for="signup-role">Role:</label><br>
-          <select id="signup-role" style="width: 100%; padding: 6px;">
+          <label for="signup-role">Role:</label>
+          <select id="signup-role">
             <option value="dispatcher" selected>Dispatcher</option>
             <option value="unit">Service Unit</option>
           </select>
         </p>
 
         <!-- Service Unit Details -->
-        <div id="signup-unit-fields" style="display: none; border-top: 1px solid #ddd; margin-top: 12px; padding-top: 10px;">
+        <div id="signup-unit-fields" hidden>
           <p>
-            <label for="signup-unit-kind">Unit Type:</label><br>
-            <select id="signup-unit-kind" style="width: 100%; padding: 6px;">
+            <label for="signup-unit-kind">Unit Type:</label>
+            <select id="signup-unit-kind">
               <option value="ambulance" selected>Ambulance</option>
               <option value="fire_truck">Fire Truck</option>
               <option value="police_unit">Police Unit</option>
               <option value="hospital">Hospital</option>
               <option value="fire_station">Fire Station</option>
               <option value="police_station">Police Station</option>
-              <option value="shelter">Shelter</option>
+              <option value="shelter">Emergency Shelter</option>
             </select>
           </p>
           <p>
-            <label for="signup-unit-name">Display Name:</label><br>
-            <input type="text" id="signup-unit-name" placeholder="e.g. City Ambulance 1" style="width: 100%; padding: 6px; box-sizing: border-box;">
+            <label for="signup-unit-name">Display Name:</label>
+            <input type="text" id="signup-unit-name" placeholder="e.g. City Ambulance 1" autocomplete="off">
           </p>
-          <div style="display: flex; gap: 10px;">
-            <p style="flex: 1; margin: 0 0 10px 0;">
-              <label for="signup-unit-lat">Latitude:</label><br>
-              <input type="number" step="any" id="signup-unit-lat" value="48.8584" style="width: 100%; padding: 6px; box-sizing: border-box;">
-            </p>
-            <p style="flex: 1; margin: 0 0 10px 0;">
-              <label for="signup-unit-lon">Longitude:</label><br>
-              <input type="number" step="any" id="signup-unit-lon" value="2.2945" style="width: 100%; padding: 6px; box-sizing: border-box;">
-            </p>
+          <div class="form-row">
+            <div class="form-col">
+              <label for="signup-unit-lat">Latitude:</label>
+              <input type="number" step="any" id="signup-unit-lat" value="48.8584" autocomplete="off">
+            </div>
+            <div class="form-col">
+              <label for="signup-unit-lon">Longitude:</label>
+              <input type="number" step="any" id="signup-unit-lon" value="2.2945" autocomplete="off">
+            </div>
           </div>
-          <p id="signup-unit-count-container" style="margin-top: 0;">
-            <label for="signup-unit-count" id="signup-unit-count-label">Paramedics:</label><br>
-            <input type="number" id="signup-unit-count" value="2" min="0" style="width: 100%; padding: 6px; box-sizing: border-box;">
+          <p id="signup-unit-count-container">
+            <label for="signup-unit-count" id="signup-unit-count-label">Paramedics:</label>
+            <input type="number" id="signup-unit-count" value="2" min="0" autocomplete="off">
           </p>
         </div>
 
         <p>
-          <button id="btn-signup" style="padding: 8px 20px; font-size: 15px;">Create Account</button>
+          <button id="btn-signup" type="submit">Create Account</button>
         </p>
       </form>
     </div>
 
+    <!-- Change Password Panel (forced or from profile) -->
+    <div id="change-password-container" hidden>
+      <h3 id="change-password-heading">Change Password</h3>
+      <p id="change-password-desc" class="form-hint">You must update your password before continuing.</p>
+      <form id="form-change-password">
+        <p>
+          <label for="change-old-password">Current Password:</label>
+          <input type="password" id="change-old-password" autocomplete="current-password" required>
+        </p>
+        <p>
+          <label for="change-new-password">New Password:</label>
+          <input type="password" id="change-new-password" autocomplete="new-password" required minlength="10" maxlength="128">
+          <small class="form-hint">Must be 10-128 characters.</small>
+        </p>
+        <p>
+          <label for="change-confirm-password">Confirm New Password:</label>
+          <input type="password" id="change-confirm-password" autocomplete="new-password" required minlength="10" maxlength="128">
+        </p>
+        <div class="button-row">
+          <button id="btn-change-password" type="submit">Update Password</button>
+          <button id="btn-cancel-change-password" type="button" hidden>Cancel</button>
+        </div>
+      </form>
+      <div id="change-password-feedback" class="form-feedback" role="status" aria-live="polite"></div>
+    </div>
+
     <!-- Auth Feedback Message -->
-    <div id="auth-feedback" style="margin-top: 15px; font-weight: bold; min-height: 20px;"></div>
+    <div id="auth-feedback" class="form-feedback" role="status" aria-live="polite"></div>
   </main>
 
   <!-- ========================================== -->
   <!-- 2. Main App View Container (Dispatcher/Admin) -->
   <!-- ========================================== -->
-  <div id="app-view" style="display: none;">
+  <div id="app-view" hidden>
 
     <!-- ========================================== -->
     <!-- 2A. Area Setup Menu (Side-by-Side Map)     -->
     <!-- ========================================== -->
-    <section id="section-area" style="display: none;">
-      <div id="area-alert" style="background: #fff3cd; border: 1px solid #ffeeba; padding: 12px; margin-bottom: 20px;">
+    <section id="section-area" hidden>
+      <div id="area-alert">
         <strong>Notice:</strong> <span id="area-alert-text">No permanent area GeoJSON detected. Please configure the operational area under your charge.</span>
       </div>
 
@@ -156,41 +222,40 @@
       <p>Enter the area details to geocode, preview the boundary and facilities side by side, and generate the permanent GeoJSON network.</p>
 
       <!-- Side-by-Side Container -->
-      <div style="display: flex; flex-direction: row; gap: 20px; align-items: flex-start; flex-wrap: wrap;">
-        
+      <div class="area-layout">
         <!-- Left Column: Form & Controls -->
-        <div style="flex: 1; min-width: 320px; border: 1px solid #ccc; padding: 18px;">
+        <div class="area-form-panel">
           <h3>Area Parameters</h3>
-          <form id="form-area" onsubmit="return false;">
+          <form id="form-area">
             <p>
-              <label for="area-name"><strong>Area / Region Name:</strong></label><br>
-              <input type="text" id="area-name" value="Eiffel Tower, Paris" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
-              <small style="color: #666;">e.g. Eiffel Tower, Paris | Paris Center | Manhattan, NY</small>
+              <label for="area-name">Area / Region Name:</label>
+              <input type="text" id="area-name" value="Eiffel Tower, Paris" autocomplete="off" required>
+              <small class="form-hint">e.g. Eiffel Tower, Paris | Paris Center | Manhattan, NY</small>
             </p>
 
             <p>
-              <label for="area-radius"><strong>Radius (meters):</strong></label><br>
-              <input type="number" id="area-radius" value="3000" min="500" max="10000" step="500" style="width: 100%; padding: 6px; box-sizing: border-box;" required>
-              <small style="color: #666;">Suggested: 1500m to 5000m</small>
+              <label for="area-radius">Radius (meters):</label>
+              <input type="number" id="area-radius" value="3000" min="500" max="10000" step="500" autocomplete="off" required>
+              <small class="form-hint">Suggested: 1500m to 5000m</small>
             </p>
 
-            <div style="margin: 15px 0; padding: 10px; background: #f8f9fa; border: 1px solid #ddd;">
+            <div class="area-preview">
               <div><strong>Geocoded Center:</strong> <span id="preview-coords">None</span></div>
               <div><strong>Full Name:</strong> <span id="preview-displayname">None</span></div>
-              <div style="margin-top: 5px; font-size: 12px; color: #555;"><i>All emergency facilities (Hospitals, Fire Stations, Police, Clinics) will be automatically detected and mapped.</i></div>
+              <div class="area-preview-note"><i>All emergency facilities (Hospitals, Fire Stations, Police, Clinics) will be automatically detected and mapped.</i></div>
             </div>
 
-            <p style="display: flex; gap: 10px; flex-wrap: wrap;">
-              <button id="btn-preview" style="padding: 8px 16px;">1. Preview Area on Map</button>
-              <button id="btn-generate" style="padding: 8px 16px; font-weight: bold;">2. Generate &amp; Save GeoJSON</button>
-            </p>
+            <div class="button-row">
+              <button id="btn-preview" type="button">1. Preview Area on Map</button>
+              <button id="btn-generate" type="button">2. Generate &amp; Save GeoJSON</button>
+            </div>
           </form>
 
-          <div id="area-pipeline-feedback" style="margin-top: 15px; font-size: 14px; white-space: pre-wrap;"></div>
+          <div id="area-pipeline-feedback" class="form-feedback" role="status" aria-live="polite"></div>
 
-          <div id="area-stats-box" style="display: none; margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;">
+          <div id="area-stats-box" hidden>
             <h4>Pipeline Generation Summary</h4>
-            <ul style="padding-left: 20px; margin: 5px 0;">
+            <ul>
               <li>Road Network Nodes: <b id="stat-nodes">0</b></li>
               <li>Road Network Edges: <b id="stat-edges">0</b></li>
               <li>Facilities Detected: <b id="stat-places">0</b></li>
@@ -202,112 +267,111 @@
         </div>
 
         <!-- Right Column: Interactive Leaflet Map Viewer -->
-        <div style="flex: 1.5; min-width: 380px; border: 1px solid #ccc; padding: 18px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <h3 style="margin: 0;">Interactive Zone Map (OpenStreetMap &amp; Leaflet)</h3>
-            <span id="map-status-overlay" style="font-size: 12px; color: #555;">Map ready</span>
+        <div class="area-map-panel">
+          <div class="map-header">
+            <h3>Interactive Zone Map (OpenStreetMap &amp; Leaflet)</h3>
+            <span id="map-status-overlay">Map ready</span>
           </div>
 
-          <!-- Leaflet Map Container with explicit height -->
-          <div id="leaflet-map" style="width: 100%; height: 480px; border: 1px solid #999; border-radius: 4px; z-index: 1;"></div>
+          <!-- Leaflet Map Container -->
+          <div id="leaflet-map"></div>
 
-          <div style="margin-top: 10px; font-size: 13px; color: #444; display: flex; gap: 15px; flex-wrap: wrap;">
-            <span><span style="display: inline-block; width: 12px; height: 12px; background: #2A81CB; border-radius: 50%; vertical-align: middle;"></span> Center Position</span>
-            <span><span style="display: inline-block; width: 12px; height: 12px; border: 1px dashed #ff8800; background: rgba(255,165,0,0.3); vertical-align: middle;"></span> Coverage Radius</span>
-            <span><span style="display: inline-block; width: 16px; height: 3px; background: #0066cc; vertical-align: middle;"></span> Drivable Roads</span>
-            <span><span style="display: inline-block; width: 10px; height: 10px; background: #e74c3c; border-radius: 50%; vertical-align: middle;"></span> Hospitals</span>
-            <span><span style="display: inline-block; width: 10px; height: 10px; background: #e67e22; border-radius: 50%; vertical-align: middle;"></span> Fire Stations</span>
-            <span><span style="display: inline-block; width: 10px; height: 10px; background: #2980b9; border-radius: 50%; vertical-align: middle;"></span> Police</span>
-            <span><span style="display: inline-block; width: 10px; height: 10px; background: #27ae60; border-radius: 50%; vertical-align: middle;"></span> Clinics &amp; Others</span>
+          <div class="map-legend">
+            <span class="legend-item"><span class="legend-swatch center"></span> Center Position</span>
+            <span class="legend-item"><span class="legend-swatch radius"></span> Coverage Radius</span>
+            <span class="legend-item"><span class="legend-swatch road"></span> Drivable Roads</span>
+            <span class="legend-item"><span class="legend-swatch hospital"></span> Hospitals</span>
+            <span class="legend-item"><span class="legend-swatch fire"></span> Fire Stations</span>
+            <span class="legend-item"><span class="legend-swatch police"></span> Police</span>
+            <span class="legend-item"><span class="legend-swatch other"></span> Clinics &amp; Others</span>
           </div>
         </div>
-
       </div>
     </section>
 
     <!-- ========================================== -->
     <!-- 2B. Incident Report Handling Menu          -->
     <!-- ========================================== -->
-    <section id="section-incidents" style="display: none;">
+    <section id="section-incidents" hidden>
       <div id="board-mount"></div>
       <div id="dispatch-mount"></div>
-      <div id="board-map" style="width: 100%; height: 480px; border: 1px solid #999; border-radius: 4px; margin: 15px 0;"></div>
+      <div id="board-map"></div>
 
       <!-- Developer Test Dispatch Alert Box in collapsed details -->
-      <details style="margin: 20px auto; max-width: 850px; border: 1px solid #ccc; background: #fafafa; border-radius: 4px;">
-        <summary style="padding: 10px 15px; font-weight: bold; cursor: pointer; background: #f0f0f0;">Developer tools</summary>
-        <div id="dispatcher-alert-test-box" style="padding: 20px; border-top: 1px solid #ccc;">
-          <h3 style="margin-top: 0; color: #333;">Developer test: send a dispatch alert to a unit</h3>
-          <form id="form-test-alert" onsubmit="return false;">
-            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 12px;">
-              <div style="flex: 1.5; min-width: 220px;">
-                <label for="alert-unit-select"><strong>Target Service Unit:</strong></label>
-                <div style="display: flex; gap: 6px; margin-top: 4px;">
-                  <select id="alert-unit-select" style="flex: 1; padding: 6px;"></select>
-                  <button id="btn-refresh-units" type="button" style="padding: 6px 12px; cursor: pointer;">↻ Refresh</button>
+      <details id="dispatcher-alert-test-details">
+        <summary>Developer tools</summary>
+        <div id="dispatcher-alert-test-box">
+          <h3>Developer test: send a dispatch alert to a unit</h3>
+          <form id="form-test-alert">
+            <div class="form-row">
+              <div class="form-col-wide">
+                <label for="alert-unit-select">Target Service Unit:</label>
+                <div class="inline-input-group">
+                  <select id="alert-unit-select"></select>
+                  <button id="btn-refresh-units" type="button">↻ Refresh</button>
                 </div>
               </div>
-              <div style="flex: 1; min-width: 140px;">
-                <label for="alert-type"><strong>Alert Type:</strong></label>
-                <select id="alert-type" style="width: 100%; padding: 6px; margin-top: 4px;">
+              <div class="form-col">
+                <label for="alert-type">Alert Type:</label>
+                <select id="alert-type">
                   <option value="Medical" selected>Medical</option>
                   <option value="Fire">Fire</option>
                   <option value="Police">Police</option>
                   <option value="Other">Other</option>
                 </select>
               </div>
-              <div style="flex: 0.7; min-width: 100px;">
-                <label for="alert-severity"><strong>Severity (1-5):</strong></label>
-                <input type="number" id="alert-severity" min="1" max="5" value="3" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+              <div class="form-col-narrow">
+                <label for="alert-severity">Severity (1-5):</label>
+                <input type="number" id="alert-severity" min="1" max="5" value="3">
               </div>
-              <div style="flex: 0.8; min-width: 110px;">
-                <label for="alert-people"><strong>People Affected:</strong></label>
-                <input type="number" id="alert-people" min="0" value="1" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
-              </div>
-            </div>
-
-            <div style="margin-bottom: 12px;">
-              <label for="alert-location"><strong>Location Text:</strong></label>
-              <input type="text" id="alert-location" value="12 Rue de Rivoli, Paris" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;" required>
-            </div>
-
-            <div style="display: flex; gap: 15px; margin-bottom: 12px; flex-wrap: wrap;">
-              <div style="flex: 1; min-width: 160px;">
-                <label for="alert-lat"><strong>Latitude (optional):</strong></label>
-                <input type="number" step="any" id="alert-lat" value="48.8584" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
-              </div>
-              <div style="flex: 1; min-width: 160px;">
-                <label for="alert-lon"><strong>Longitude (optional):</strong></label>
-                <input type="number" step="any" id="alert-lon" value="2.2945" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+              <div class="form-col-narrow">
+                <label for="alert-people">People Affected:</label>
+                <input type="number" id="alert-people" min="0" value="1">
               </div>
             </div>
 
-            <div style="margin-bottom: 12px;">
-              <label for="alert-note"><strong>Note / Instructions:</strong></label>
-              <input type="text" id="alert-note" placeholder="Provide emergency context or notes" style="width: 100%; padding: 6px; margin-top: 4px; box-sizing: border-box;">
+            <p>
+              <label for="alert-location">Location Text:</label>
+              <input type="text" id="alert-location" value="12 Rue de Rivoli, Paris" required>
+            </p>
+
+            <div class="form-row">
+              <div class="form-col">
+                <label for="alert-lat">Latitude (optional):</label>
+                <input type="number" step="any" id="alert-lat" value="48.8584">
+              </div>
+              <div class="form-col">
+                <label for="alert-lon">Longitude (optional):</label>
+                <input type="number" step="any" id="alert-lon" value="2.2945">
+              </div>
             </div>
 
-            <div>
-              <button id="btn-send-alert" type="button" style="padding: 8px 22px; font-weight: bold; background: #0066cc; color: white; border: none; border-radius: 3px; cursor: pointer;">Send Dispatch Alert</button>
-              <span id="alert-send-feedback" style="margin-left: 12px; font-weight: bold; font-size: 13px;"></span>
+            <p>
+              <label for="alert-note">Note / Instructions:</label>
+              <input type="text" id="alert-note" placeholder="Provide emergency context or notes">
+            </p>
+
+            <div class="button-row">
+              <button id="btn-send-alert" type="button">Send Dispatch Alert</button>
+              <span id="alert-send-feedback" class="form-feedback" role="status" aria-live="polite"></span>
             </div>
           </form>
 
-          <hr style="margin: 25px 0;">
-          <h4 style="margin: 0 0 10px 0;">Tracked Dispatch Alerts (Live Updates Every 3s)</h4>
-          <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+          <hr>
+          <h4>Tracked Dispatch Alerts (Live Updates Every 3s)</h4>
+          <table>
             <thead>
-              <tr style="background: #e9ecef; border-bottom: 2px solid #ccc;">
-                <th style="padding: 8px;">ID</th>
-                <th style="padding: 8px;">Target Unit</th>
-                <th style="padding: 8px;">Type</th>
-                <th style="padding: 8px;">Severity</th>
-                <th style="padding: 8px;">State</th>
-                <th style="padding: 8px;">Created At</th>
+              <tr>
+                <th>ID</th>
+                <th>Target Unit</th>
+                <th>Type</th>
+                <th>Severity</th>
+                <th>State</th>
+                <th>Created At</th>
               </tr>
             </thead>
             <tbody id="alerts-table-body">
-              <tr><td colspan="6" style="padding: 10px; text-align: center; color: #777;">Loading alerts...</td></tr>
+              <tr><td colspan="6">Loading alerts...</td></tr>
             </tbody>
           </table>
         </div>
@@ -317,10 +381,15 @@
     <!-- ========================================== -->
     <!-- 2C. Past Dispatch Statistics               -->
     <!-- ========================================== -->
-    <section id="section-stats" style="display: none;">
-      <div style="display: flex; justify-content: center; align-items: center; min-height: 60vh; text-align: center;">
-        <h1 style="font-size: 56px; color: #888; margin: 0; font-weight: 800; letter-spacing: 4px;">UNDER DEVELOPMENT</h1>
-      </div>
+    <section id="section-stats" hidden>
+      <div id="stats-root"></div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 2D. Users & Admin Management               -->
+    <!-- ========================================== -->
+    <section id="section-admin" hidden>
+      <div id="admin-root"></div>
     </section>
 
   </div>
@@ -328,20 +397,25 @@
   <!-- ========================================== -->
   <!-- 3. Unit View Container (Role: unit)        -->
   <!-- ========================================== -->
-  <div id="unit-view" style="display: none; max-width: 900px; margin: 20px auto;">
-    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0066cc; padding-bottom: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-      <h2 style="margin: 0;">Service Unit Terminal: <span id="unit-header-name">Unit</span> (<span id="unit-header-kind">KIND</span>)</h2>
-      <button id="btn-unit-logout" style="background: #fee; border-color: #c00; padding: 6px 14px; cursor: pointer; border-radius: 3px;">Logout</button>
+  <div id="unit-view" hidden>
+    <div class="unit-view-header">
+      <h2>Service Unit Terminal: <span id="unit-header-name">Unit</span> (<span id="unit-header-kind">KIND</span>)</h2>
+      <button id="btn-unit-logout" type="button">Logout</button>
     </div>
-    <div style="margin-bottom: 15px;">
-      <button id="tab-unit-resources" style="padding: 8px 18px; font-weight: bold; cursor: pointer;">Availability &amp; Resources</button>
-      <button id="tab-unit-alerts" style="padding: 8px 18px; cursor: pointer;">Dispatch Alert <span id="badge-unit-pending" style="display: none; background: #d9534f; color: white; border-radius: 10px; padding: 2px 7px; font-size: 11px;">NEW</span></button>
+    <div class="unit-view-tabs">
+      <button id="tab-unit-resources" type="button">Availability &amp; Resources</button>
+      <button id="tab-unit-alerts" type="button">Dispatch Alert <span id="badge-unit-pending" hidden>NEW</span></button>
     </div>
     <div id="view-unit-resources"></div>
-    <div id="view-unit-alerts" style="display: none;"></div>
+    <div id="view-unit-alerts" hidden></div>
   </div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="unit.js"></script>
-  <script src="app.js"></script>
+  <script src="board.js"></script>
+  <script src="dispatch.js"></script>
+  <script src="stats.js"></script>
+  <script src="admin.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

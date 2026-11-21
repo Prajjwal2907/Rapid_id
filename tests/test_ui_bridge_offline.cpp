@@ -34,28 +34,46 @@ int main() {
     fs::create_directories(cacheDir, ec);
     fs::create_directories(outDir, ec);
 
-    // 1. Test Auth & SignUp Bridge
-    Auth auth(usersPath);
-    
+    rapidaid::data::DataCache cache(cacheDir, false);
+
+    // 1. Test Auth & SignUp Bridge using AuthOptions
+    AuthOptions opts;
+    opts.usersPath = usersPath;
+    opts.keyPath = tempDir + "/auth.key";
+    opts.bootstrapAdminPassword = "Admin-Test-Pass-9";
+    opts.pbkdf2Iterations = 1000;
+    opts.announceBootstrap = false;
+    Auth auth(opts);
+
     // Login with seeded admin
-    std::string loginAdminReq = R"({"username":"admin","password":"admin123"})";
+    std::string loginAdminReq = R"({"username":"admin","password":"Admin-Test-Pass-9"})";
     std::string loginAdminResp = handleLoginRequest(auth, loginAdminReq);
     json jAdmin = json::parse(loginAdminResp);
     check(jAdmin["ok"] == true && jAdmin["role"] == "admin", "Admin login succeeds via bridge", failed);
 
-    // Signup new dispatcher
-    std::string signupReq = R"({"username":"sarah","password":"secret456","role":"dispatcher"})";
-    std::string signupResp = handleSignUpRequest(auth, signupReq);
+    // Signup new dispatcher (self-signup -> pending)
+    std::string signupReq = R"({"action":"signup","payload":{"username":"sarah","password":"Secure-Dispat-Pass-1!","role":"dispatcher"}})";
+    std::string signupResp = rapidaid::ui::handleBridgeMessage(auth, cache, signupReq, outDir);
     json jSignup = json::parse(signupResp);
     check(jSignup["ok"] == true && jSignup["username"] == "sarah", "SignUp new dispatcher succeeds", failed);
 
     // Duplicate signup fails
-    std::string signupDupResp = handleSignUpRequest(auth, signupReq);
+    std::string signupDupResp = rapidaid::ui::handleBridgeMessage(auth, cache, signupReq, outDir);
     json jSignupDup = json::parse(signupDupResp);
     check(jSignupDup["ok"] == false && jSignupDup["error"] == "Username already exists", "Duplicate signup fails gracefully", failed);
 
-    // Login with new dispatcher
-    std::string loginSarahReq = R"({"username":"sarah","password":"secret456"})";
+    // Login with pending dispatcher fails
+    std::string loginSarahReq = R"({"username":"sarah","password":"Secure-Dispat-Pass-1!"})";
+    std::string loginSarahPendingResp = handleLoginRequest(auth, loginSarahReq);
+    json jSarahPending = json::parse(loginSarahPendingResp);
+    check(jSarahPending["ok"] == false && jSarahPending["code"] == "pending", "Pending dispatcher cannot log in", failed);
+
+    // Admin approves dispatcher
+    std::string appErr;
+    bool approved = auth.approve("sarah", appErr);
+    check(approved, "Admin approval of sarah succeeds", failed);
+
+    // Login with approved dispatcher succeeds
     std::string loginSarahResp = handleLoginRequest(auth, loginSarahReq);
     json jSarah = json::parse(loginSarahResp);
     check(jSarah["ok"] == true && jSarah["role"] == "dispatcher", "New dispatcher login succeeds", failed);
@@ -66,7 +84,6 @@ int main() {
     check(jStat1["ok"] == true && jStat1["exists"] == false, "Area status reports false when no GeoJSON exists", failed);
 
     // 3. Prepare Canned Cache Data for Offline Pipeline Testing
-    rapidaid::data::DataCache cache(cacheDir, false);
     std::string query = "Paris Center";
     std::string geocodeJson = R"([
         {
@@ -164,10 +181,11 @@ int main() {
     json jGetInc = json::parse(getIncResp);
     check(jGetInc["ok"] == true && jGetInc["count"] >= 1, "handleGetIncidentsRequest returns active queue", failed);
 
-    // 9. Test Stats Bridge
+    // 9. Test Stats Bridge per Contract C
     std::string statsResp = rapidaid::ui::handleGetStatsRequest();
     json jStats = json::parse(statsResp);
-    check(jStats["ok"] == true && jStats["status"] == "under_development", "handleGetStatsRequest returns stats payload", failed);
+    check(jStats["ok"] == true && jStats.contains("incidents") && jStats.contains("alerts") && jStats.contains("recent"),
+          "handleGetStatsRequest returns stats payload per Contract C", failed);
 
     // 10. Test Unified Bridge Router
     std::string bridgeMsg = R"({"action":"health","payload":{}})";

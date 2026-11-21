@@ -2,12 +2,14 @@
 #define LOGIN_HPP
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 /**
  * @class Logger
- * @brief Simple timestamped event logger for login/logout actions.
+ * @brief Timestamped event logger for authentication events with control character sanitization.
  */
 class Logger {
     std::string filename;
@@ -15,94 +17,267 @@ public:
     /**
      * @brief Constructs a Logger with a target output file.
      * @param f File path to append log records to (defaults to "log.txt").
-     * Failure behavior: Does not fail; initializes filename member with given path.
+     * Failure behavior: Does not fail; initializes member with given path.
      */
     Logger(std::string f = "log.txt");
 
     /**
-     * @brief Appends a timestamped log entry in the format: "<timestamp> | <type> | <details>\n".
+     * @brief Appends a sanitized, timestamped log entry: "<timestamp> | <type> | <details>\n".
+     *        Control characters (<0x20 and 0x7F) are stripped, fields capped at 200 chars.
+     *        Owner-only file permissions are applied where supported.
      * @param type Event category (e.g., "LOGIN_SUCCESS", "LOGIN_FAILED", "LOGOUT").
      * @param details Additional context or username associated with the event.
-     * Failure behavior: If the file cannot be opened or written to, the write fails silently
-     *                    without throwing exceptions.
+     * Failure behavior: Fails silently without throwing exceptions if file cannot be opened.
      */
     void log(std::string type, std::string details);
 };
 
 /**
- * @struct User
- * @brief Internal user record storing password hash and role designation.
+ * @struct AuthOptions
+ * @brief Configuration parameters for Auth initialization.
  */
-struct User {
-    std::size_t passHash;
+struct AuthOptions {
+    std::string usersPath = "users.txt";
+    std::string keyPath = "data/auth.key";
+    std::string bootstrapAdminPassword;
+    int pbkdf2Iterations = 600000;
+    std::function<long long()> clock;
+    bool announceBootstrap = true;
+};
+
+/**
+ * @struct LoginResult
+ * @brief Result object returned by Auth::login2.
+ */
+struct LoginResult {
+    enum Status { Ok, BadCredentials, Locked, Pending, Disabled } status;
     std::string role;
+    bool mustChangePassword = false;
+    int retryAfterSeconds = 0;
+};
+
+/**
+ * @struct SignUpResult
+ * @brief Detailed result object returned by Auth::signUp.
+ */
+struct SignUpResult {
+    bool ok;
+    std::string code;
+    std::string error;
+};
+
+/**
+ * @struct UserInfo
+ * @brief User record representation for user listing queries.
+ */
+struct UserInfo {
+    std::string username;
+    std::string role;
+    std::string status; // "active", "pending", "disabled"
+    bool mustChangePassword;
+    long long createdAt;
+};
+
+/**
+ * @struct PasswordCheck
+ * @brief Result object returned by checkPasswordPolicy.
+ */
+struct PasswordCheck {
+    bool ok;
+    std::string reason;
 };
 
 /**
  * @class Auth
- * @brief Manages authentication, user storage, and credential validation.
+ * @brief Manages authentication, user storage, credential validation, and lockout policies.
  */
 class Auth {
-    std::unordered_map<std::string, User> users;
-    std::string filename;
-
-    /**
-     * @brief Computes a std::hash for the given password string.
-     * Failure behavior: Does not fail; returns std::size_t hash code.
-     */
-    std::size_t hashPass(const std::string& p);
-
 public:
     /**
-     * @brief Constructs an Auth instance and loads users from disk.
-     *        If no users are found after loading, automatically creates default "admin" account.
-     * @param f File path for user credentials storage (defaults to "users.txt").
-     * Failure behavior: If the file cannot be opened or read, users remains empty,
-     *                    and the default admin account ("admin", "admin123", "admin") is created and saved.
+     * @brief Constructs an Auth instance using comprehensive AuthOptions.
+     * @param opts Configuration options.
+     * Failure behavior: If users file is malformed or required keys are missing, ready() becomes false. Never throws.
      */
-    Auth(std::string f = "users.txt");
+    explicit Auth(AuthOptions opts);
 
     /**
-     * @brief Loads user records from the configured file.
-     * Failure behavior: If the file cannot be opened or data is malformed, reading ceases;
-     *                    any users loaded prior to the error remain in memory.
+     * @brief Constructs an Auth instance with default options targeting the given users file path.
+     * @param usersPath Path to users credentials file.
+     * Failure behavior: If users file is malformed, ready() becomes false. Never throws.
      */
+    explicit Auth(std::string usersPath = "users.txt");
+
+    /**
+     * @brief Checks if authentication subsystem is operational and valid.
+     * @return True if ready for operations; false if corrupted or key missing.
+     * Failure behavior: Pure accessor. Never throws.
+     */
+    bool ready() const;
+
+    /**
+     * @brief Describes the reason why the system is not ready.
+     * @return Descriptive error string, or empty string if ready.
+     * Failure behavior: Pure accessor. Never throws.
+     */
+    std::string notReadyReason() const;
+
+    /**
+     * @brief Authenticates credentials with lockout enforcement and constant-time defense.
+     * @param user Username.
+     * @param pw Plaintext password.
+     * @return LoginResult with detailed status, role, mustChangePassword, and retryAfterSeconds.
+     * Failure behavior: Never throws; returns BadCredentials or Locked on failure.
+     */
+    LoginResult login2(const std::string& user, const std::string& pw);
+
+    /**
+     * @brief Backward-compatible login check.
+     * @param user Username.
+     * @param pw Plaintext password.
+     * @return True only when login2 status is Ok; false otherwise.
+     * Failure behavior: Returns false on any failure. Never throws.
+     */
+    bool login(const std::string& user, const std::string& pw);
+
+    /**
+     * @brief Retrieves role designation for user without inserting into the map.
+     * @param user Username.
+     * @return Role string ("admin", "dispatcher", "unit") or "" if unknown.
+     * Failure behavior: Case-insensitive lookup; never mutates storage. Never throws.
+     */
+    std::string getRole(const std::string& user) const;
+
+    /**
+     * @brief Registers a new user with specified role and active status flag.
+     * @param user Username (3..32 characters [A-Za-z0-9._-]).
+     * @param pw Plaintext password satisfying security policy.
+     * @param role Role ("admin", "dispatcher", "unit").
+     * @param active True if account is active immediately; false for pending.
+     * @return SignUpResult indicating success or specific error code.
+     * Failure behavior: Returns ok=false on policy violation, duplicate user, or storage failure. Never throws.
+     */
+    SignUpResult signUp(const std::string& user, const std::string& pw, const std::string& role, bool active);
+
+    /**
+     * @brief Backward-compatible registration helper creating an active user.
+     * @param user Username.
+     * @param pw Plaintext password.
+     * @param role Role designation.
+     * @return True on success; false on failure.
+     * Failure behavior: Never throws.
+     */
+    bool signUp(const std::string& user, const std::string& pw, const std::string& role);
+
+    /**
+     * @brief Changes a user's password after verifying existing password and validating new policy.
+     * @param user Username.
+     * @param oldPw Current plaintext password.
+     * @param newPw New plaintext password.
+     * @param err Output error message on failure.
+     * @return True on success; false on failure.
+     * Failure behavior: Returns false if old password invalid or new password violates policy. Never throws.
+     */
+    bool changePassword(const std::string& user, const std::string& oldPw, const std::string& newPw, std::string& err);
+
+    /**
+     * @brief Generates a random temporary password for a user, setting mustChange=1.
+     * @param user Username.
+     * @param tempOut Output string receiving generated temporary password.
+     * @param err Output error message on failure.
+     * @return True on success; false on failure.
+     * Failure behavior: Returns false if user does not exist. Never throws.
+     */
+    bool adminResetPassword(const std::string& user, std::string& tempOut, std::string& err);
+
+    /**
+     * @brief Updates status of a user ("active" or "disabled"). Last active admin cannot be disabled.
+     * @param user Username.
+     * @param status New status ("active" | "disabled").
+     * @param err Output error message on failure.
+     * @return True on success; false on failure.
+     * Failure behavior: Returns false if user not found, status invalid, or disabling last active admin. Never throws.
+     */
+    bool setStatus(const std::string& user, const std::string& status, std::string& err);
+
+    /**
+     * @brief Approves a pending user by setting status to "active".
+     * @param user Username.
+     * @param err Output error message on failure.
+     * @return True on success; false on failure.
+     * Failure behavior: Returns false if user not found or not pending. Never throws.
+     */
+    bool approve(const std::string& user, std::string& err);
+
+    /**
+     * @brief Enumerates all registered users.
+     * @return Vector of UserInfo structures.
+     * Failure behavior: Never throws.
+     */
+    std::vector<UserInfo> listUsers() const;
+
+    /**
+     * @brief Checks if a user exists and is active.
+     * @param user Username.
+     * @return True if exists and status == "active"; false otherwise.
+     * Failure behavior: Never throws.
+     */
+    bool isActive(const std::string& user) const;
+
+    /**
+     * @brief Validates password against length (10..128), username inclusion, and common passwords.
+     * @param pw Password to evaluate.
+     * @param username Associated username.
+     * @return PasswordCheck result with ok flag and reason string.
+     * Failure behavior: Never throws.
+     */
+    static PasswordCheck checkPasswordPolicy(const std::string& pw, const std::string& username);
+
+    /**
+     * @brief Validates username character set [A-Za-z0-9._-] and length (3..32).
+     * @param u Username to evaluate.
+     * @return True if valid; false otherwise.
+     * Failure behavior: Never throws.
+     */
+    static bool isValidUsername(const std::string& u);
+
+private:
+    struct UserRecord {
+        std::string originalUsername;
+        bool isLegacy = false;
+        std::size_t legacyHash = 0;
+        std::string hash;
+        std::string role;
+        std::string status;
+        bool mustChangePassword = false;
+        long long createdAt = 0;
+    };
+
+    struct LockoutInfo {
+        int failureCount = 0;
+        long long firstFailureTime = 0;
+        long long lastFailureTime = 0;
+        long long lockedUntil = 0;
+    };
+
+    AuthOptions opts_;
+    bool ready_ = true;
+    std::string notReadyReason_;
+    std::string pepper_;
+    std::string dummyHash_;
+
+    std::unordered_map<std::string, UserRecord> users_;
+    std::vector<std::string> userOrder_;
+    std::unordered_map<std::string, LockoutInfo> lockouts_;
+
+    long long now() const;
+    void init();
     void load();
-
-    /**
-     * @brief Persists all user records to the configured file.
-     * Failure behavior: If the file cannot be opened for writing, no data is written;
-     *                    fails silently without throwing exceptions.
-     */
     void save();
-
-    /**
-     * @brief Registers a new user with the specified credentials and role.
-     * @param u Desired username.
-     * @param p Plaintext password.
-     * @param role User role designation (e.g., "admin", "dispatcher").
-     * @return true if the user was successfully registered; false if the username already exists.
-     * Failure behavior: Returns false if the username is already registered in the users map.
-     */
-    bool signUp(std::string u, std::string p, std::string role);
-
-    /**
-     * @brief Validates login credentials against existing user records.
-     * @param u Username to verify.
-     * @param p Plaintext password to verify against stored hash.
-     * @return true if credentials match; false otherwise.
-     * Failure behavior: Returns false if username is not found or password hash does not match.
-     */
-    bool login(std::string u, std::string p);
-
-    /**
-     * @brief Retrieves the role associated with the specified username.
-     * @param u Username to query.
-     * @return The user's role string.
-     * Failure behavior: If the username does not exist in the map, accessing users[u] default-inserts
-     *                    an entry with hash 0 and returns an empty string ("").
-     */
-    std::string getRole(std::string u);
+    void trackFailure(const std::string& lowerUser, long long currentTime);
+    void resetLockout(const std::string& lowerUser);
+    int getRetryAfter(const std::string& lowerUser, long long currentTime) const;
+    std::size_t hashPass(const std::string& p) const;
+    static std::string toLower(const std::string& s);
 };
 
 /**
@@ -118,14 +293,8 @@ void dispatcherMenu(Auth& auth, Logger& logger, std::string user);
  * @brief Processes a JSON-formatted login request and returns a JSON response string.
  * @param auth Reference to active Auth instance.
  * @param requestJson JSON payload formatted as: {"username":"..","password":".."}
- * @return JSON response string:
- *         Success: {"ok":true,"username":"..","role":".."}
- *         Auth Failure: {"ok":false,"error":"Invalid username or password"}
- *         Bad Request:  {"ok":false,"error":"Bad request"}
- * Failure behavior: Never throws. Returns {"ok":false,"error":"Bad request"} on malformed JSON,
- *                    non-object JSON, missing "username"/"password", or non-string values.
- *                    Returns {"ok":false,"error":"Invalid username or password"} if credentials
- *                    do not match. Logs attempts via Logger without logging passwords.
+ * @return JSON response string with ok, role, mustChangePassword on success; code and retryAfterSeconds on failure.
+ * Failure behavior: Never throws. Returns Bad request on malformed JSON. Never outputs password or hash.
  */
 std::string handleLoginRequest(Auth& auth, const std::string& requestJson);
 
@@ -134,7 +303,7 @@ std::string handleLoginRequest(Auth& auth, const std::string& requestJson);
  * @param auth Reference to active Auth instance.
  * @param username Username of the logging-out user.
  * @return JSON response string: {"ok":true}
- * Failure behavior: Never throws. Always returns {"ok":true}. Logs the logout event via Logger.
+ * Failure behavior: Never throws. Always returns {"ok":true}. Logs logout without passwords.
  */
 std::string handleLogoutRequest(Auth& auth, const std::string& username);
 
@@ -149,14 +318,8 @@ std::string handleHealthRequest();
  * @brief Processes a JSON-formatted signup request and returns a JSON response string.
  * @param auth Reference to active Auth instance.
  * @param requestJson JSON payload formatted as: {"username":"..","password":"..","role":".."}
- * @return JSON response string:
- *         Success: {"ok":true,"username":"..","role":".."}
- *         Username exists: {"ok":false,"error":"Username already exists"}
- *         Bad Request:  {"ok":false,"error":"Bad request"}
- * Failure behavior: Never throws. Returns {"ok":false,"error":"Bad request"} on malformed JSON,
- *                    non-object JSON, missing "username"/"password", empty strings, or non-string values.
- *                    Returns {"ok":false,"error":"Username already exists"} if user already exists.
- *                    Logs attempts via Logger without logging passwords.
+ * @return JSON response string.
+ * Failure behavior: Never throws. Returns Bad request or policy rejection. Never outputs password or hash.
  */
 std::string handleSignUpRequest(Auth& auth, const std::string& requestJson);
 

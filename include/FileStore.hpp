@@ -13,6 +13,12 @@ public:
     // Failure behavior: returns false on any failure (e.g. directory creation, write, rename). Never throws.
     static bool save(const std::string& path, const std::string& text);
 
+    // Saves text to path atomically via a temporary file (path + ".tmp"), then sets owner-only permissions.
+    // On POSIX systems, applies std::filesystem::perms::owner_read | std::filesystem::perms::owner_write using replace.
+    // On Windows, best effort is attempted; failure to set permissions does not fail the save.
+    // Failure behavior: returns false if save() fails or if POSIX permissions cannot be set. Never throws.
+    static bool saveSecret(const std::string& path, const std::string& text);
+
     // Reads the entire file as a binary string.
     // Failure behavior: returns an empty string ("") if the file is missing, unreadable, or on any error. Never throws.
     static std::string load(const std::string& path);

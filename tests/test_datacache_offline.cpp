@@ -202,12 +202,84 @@ int main() {
         }
     }
 
-    // Case 7: Clean up temporary test directory
+    // Case 7: refresh=true with valid canned file at out-of-range coordinates (999.0) falls back to canned data
+    {
+        rapidaid::data::DataCache cache(tempDir, true);
+
+        // Places canned file at out-of-range coords 999.0
+        double lat = 999.0;
+        double lon = 999.0;
+        int radius = 1000;
+        std::string cannedPlacesPath = cache.placesPath(rapidaid::osm::Category::Hospital, lat, lon, radius);
+
+        std::string cannedPlacesJson = R"({
+            "elements": [
+                {
+                    "type": "node",
+                    "id": 5001,
+                    "lat": 999.0,
+                    "lon": 999.0,
+                    "tags": {
+                        "amenity": "hospital",
+                        "name": "Fallback General Hospital"
+                    }
+                }
+            ]
+        })";
+
+        bool savedP = rapidaid::io::FileStore::save(cannedPlacesPath, cannedPlacesJson);
+
+        // Roads canned file at out-of-range coords 999.0
+        std::string cannedRoadsPath = cache.roadsPath(lat, lon, radius);
+        std::string cannedRoadsJson = R"({
+            "elements": [
+                { "type": "node", "id": 101, "lat": 999.0, "lon": 999.0 },
+                { "type": "node", "id": 102, "lat": 999.0, "lon": 999.001 },
+                {
+                    "type": "way",
+                    "id": 501,
+                    "nodes": [101, 102],
+                    "tags": { "highway": "residential", "name": "Fallback Road" }
+                }
+            ]
+        })";
+
+        bool savedR = rapidaid::io::FileStore::save(cannedRoadsPath, cannedRoadsJson);
+
+        if (savedP && savedR) {
+            auto places = cache.places(rapidaid::osm::Category::Hospital, lat, lon, radius);
+            auto roads = cache.roads(lat, lon, radius);
+
+            bool placesOk = (places.size() == 1 &&
+                             places[0].id == 5001 &&
+                             places[0].name == "Fallback General Hospital" &&
+                             rapidaid::io::FileStore::exists(cannedPlacesPath));
+
+            bool roadsOk = (!roads.empty() &&
+                            roads.ways.size() == 1 &&
+                            roads.ways[0].id == 501 &&
+                            roads.ways[0].name == "Fallback Road" &&
+                            rapidaid::io::FileStore::exists(cannedRoadsPath));
+
+            if (placesOk && roadsOk) {
+                std::cout << "[PASS] Case 7: refresh=true falls back to valid canned files when fetchRaw returns empty\n";
+            } else {
+                std::cout << "[FAIL] Case 7: refresh=true fallback failed (placesOk=" << placesOk
+                          << ", roadsOk=" << roadsOk << ")\n";
+                failed++;
+            }
+        } else {
+            std::cout << "[FAIL] Case 7: failed to save canned files\n";
+            failed++;
+        }
+    }
+
+    // Case 8: Clean up temporary test directory
     std::filesystem::remove_all(tempDir, ec);
     if (!std::filesystem::exists(tempDir)) {
-        std::cout << "[PASS] Case 7: Cleaned up temporary test directory\n";
+        std::cout << "[PASS] Case 8: Cleaned up temporary test directory\n";
     } else {
-        std::cout << "[FAIL] Case 7: Failed to clean up temporary test directory\n";
+        std::cout << "[FAIL] Case 8: Failed to clean up temporary test directory\n";
         failed++;
     }
 

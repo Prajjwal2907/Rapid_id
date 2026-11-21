@@ -21,6 +21,11 @@ namespace {
             curl_global_cleanup();
         }
     };
+
+    void ensureCurlInit() {
+        static const CurlGlobalGuard guard;
+        (void)guard;
+    }
 }
 
 namespace rapidaid::net {
@@ -33,8 +38,7 @@ namespace rapidaid::net {
     }
 
     std::string HttpClient::performRequest(const std::string& url, const std::string* body) {
-        // Function-local static object ensures curl_global_init runs once per process
-        static const CurlGlobalGuard curlGlobalGuard;
+        ensureCurlInit();
         // Function-local static string ensures User-Agent is built once per process
         static const std::string userAgent = std::string(USER_AGENT_BASE) + " (" + rapidaid::config::kContact + ")";
 
@@ -55,6 +59,7 @@ namespace rapidaid::net {
 
         if (body != nullptr) {
             curl_easy_setopt(handle, CURLOPT_POSTFIELDS, body->c_str());
+            curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body->size()));
         }
 
         CURLcode res = curl_easy_perform(handle);
@@ -80,7 +85,7 @@ namespace rapidaid::net {
     }
 
     std::string HttpClient::urlEncode(const std::string& text) {
-        static const CurlGlobalGuard curlGlobalGuard;
+        ensureCurlInit();
 
         CURL* handle = curl_easy_init();
         if (!handle) {

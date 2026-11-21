@@ -8,10 +8,14 @@
  * - Resource management (Hospital beds, Shelter capacity, Mobile unit counters)
  * - Subunit management (Ambulances, Fire trucks, Police units)
  * - Alert lifecycle transitions (Accept, Decline, En Route, On Scene, Transporting, Clear)
- * Strict textContent usage for all dynamic text to prevent XSS.
+ * - Strict textContent usage for all dynamic text to prevent XSS.
+ * - Uses modules.css classes (prefixed unit-) and CSS variables for dark/night mode.
+ * - Dispatches rapidaid:session-expired CustomEvent and stops timers on not_logged_in / session_expired.
  */
 
 window.RapidAidUnit = (function() {
+  'use strict';
+
   let pollInterval = null;
   let audioCtx = null;
   let beepInterval = null;
@@ -25,10 +29,31 @@ window.RapidAidUnit = (function() {
   let currentIncidentMarker = null;
 
   function getToken() {
-    return sessionStorage.getItem('rapidaid_token') || '';
+    return (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('rapidaid_token')) || '';
+  }
+
+  function checkSessionExpired(res) {
+    if (!res) return;
+    const code = res.code || (res.error === 'not_logged_in' || res.error === 'session_expired' ? res.error : null);
+    if (code === 'not_logged_in' || code === 'session_expired') {
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('rapidaid:session-expired', { detail: { code: code } }));
+      }
+      stop();
+    }
   }
 
   async function callBridge(action, payload = {}) {
+    if (typeof window !== 'undefined' && window.RapidAid && typeof window.RapidAid.callBridge === 'function') {
+      try {
+        const r = await window.RapidAid.callBridge(action, payload);
+        checkSessionExpired(r);
+        return r;
+      } catch (err) {
+        return { ok: false, error: err.message || 'Error communicating with bridge' };
+      }
+    }
+
     const token = getToken();
     try {
       const res = await fetch('/api/bridge', {
@@ -36,10 +61,19 @@ window.RapidAidUnit = (function() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, token, payload })
       });
-      return await res.json();
+      const data = await res.json();
+      checkSessionExpired(data);
+      return data;
     } catch (err) {
       return { ok: false, error: 'Network error communicating with server' };
     }
+  }
+
+  // Global listener for session expiry
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('rapidaid:session-expired', function() {
+      stop();
+    });
   }
 
   function startBeeping() {
@@ -130,20 +164,24 @@ window.RapidAidUnit = (function() {
     if (tabRes) {
       tabRes.onclick = () => {
         activeTab = 'resources';
-        tabRes.style.fontWeight = 'bold';
-        if (tabAlerts) tabAlerts.style.fontWeight = 'normal';
-        document.getElementById('view-unit-resources').style.display = 'block';
-        document.getElementById('view-unit-alerts').style.display = 'none';
+        tabRes.classList.add('active');
+        if (tabAlerts) tabAlerts.classList.remove('active');
+        const vRes = document.getElementById('view-unit-resources');
+        const vAlerts = document.getElementById('view-unit-alerts');
+        if (vRes) vRes.style.display = 'block';
+        if (vAlerts) vAlerts.style.display = 'none';
       };
     }
 
     if (tabAlerts) {
       tabAlerts.onclick = () => {
         activeTab = 'alerts';
-        tabAlerts.style.fontWeight = 'bold';
-        if (tabRes) tabRes.style.fontWeight = 'normal';
-        document.getElementById('view-unit-alerts').style.display = 'block';
-        document.getElementById('view-unit-resources').style.display = 'none';
+        tabAlerts.classList.add('active');
+        if (tabRes) tabRes.classList.remove('active');
+        const vRes = document.getElementById('view-unit-resources');
+        const vAlerts = document.getElementById('view-unit-alerts');
+        if (vAlerts) vAlerts.style.display = 'block';
+        if (vRes) vRes.style.display = 'none';
         if (currentAlertMap) {
           setTimeout(() => {
             try { currentAlertMap.invalidateSize(); } catch (e) {}
@@ -209,38 +247,30 @@ window.RapidAidUnit = (function() {
 
     // 1. Status & Availability Box
     const statusBox = document.createElement('div');
-    statusBox.style.padding = '12px';
-    statusBox.style.marginBottom = '15px';
-    statusBox.style.border = '1px solid #ccc';
-    statusBox.style.background = '#f9f9f9';
+    statusBox.className = 'unit-res-box';
 
     const statusLine = document.createElement('div');
-    statusLine.style.marginBottom = '8px';
+    statusLine.className = 'unit-res-stats';
     const stLabel = document.createElement('strong');
     stLabel.textContent = 'Current Status: ';
     statusLine.appendChild(stLabel);
 
     const stVal = document.createElement('span');
     stVal.textContent = status;
-    stVal.style.fontWeight = 'bold';
-    stVal.style.color = (status === 'Available') ? '#28a745' :
-                        (status === 'Dispatched') ? '#0066cc' : '#dc3545';
+    stVal.className = 'status-chip status-chip-' + status.toLowerCase();
     statusLine.appendChild(stVal);
     statusBox.appendChild(statusLine);
 
     if (isMobile) {
       const toggleBtn = document.createElement('button');
-      toggleBtn.style.padding = '6px 14px';
-      toggleBtn.style.cursor = 'pointer';
+      toggleBtn.className = 'unit-btn';
 
       if (status === 'Dispatched') {
         toggleBtn.disabled = true;
         toggleBtn.textContent = 'Status Locked: Dispatched to Incident';
         const expl = document.createElement('span');
-        expl.style.marginLeft = '10px';
-        expl.style.color = '#666';
-        expl.style.fontSize = '12px';
-        expl.textContent = '(Availability cannot be changed while actively dispatched)';
+        expl.className = 'unit-empty-text';
+        expl.textContent = ' (Availability cannot be changed while actively dispatched)';
         statusBox.appendChild(toggleBtn);
         statusBox.appendChild(expl);
       } else {
@@ -261,45 +291,39 @@ window.RapidAidUnit = (function() {
 
     // 2. Geographic Location Controls
     const locBox = document.createElement('div');
-    locBox.style.padding = '12px';
-    locBox.style.marginBottom = '15px';
-    locBox.style.border = '1px solid #ccc';
-    locBox.style.background = '#f9f9f9';
+    locBox.className = 'unit-loc-box';
 
     const locH4 = document.createElement('h4');
-    locH4.style.margin = '0 0 10px 0';
+    locH4.className = 'unit-res-title';
     locH4.textContent = 'Unit Geographic Coordinates';
     locBox.appendChild(locH4);
 
     const locInputs = document.createElement('div');
-    locInputs.style.display = 'flex';
-    locInputs.style.gap = '10px';
-    locInputs.style.alignItems = 'center';
-    locInputs.style.flexWrap = 'wrap';
+    locInputs.className = 'unit-controls-row';
 
     const latLabel = document.createElement('label');
+    latLabel.className = 'unit-label';
     latLabel.textContent = 'Lat: ';
     const latIn = document.createElement('input');
     latIn.type = 'number';
     latIn.step = 'any';
     latIn.value = prof.lat !== undefined ? prof.lat : '';
-    latIn.style.width = '120px';
-    latIn.style.padding = '4px';
+    latIn.className = 'unit-input unit-input-coord';
     latLabel.appendChild(latIn);
 
     const lonLabel = document.createElement('label');
+    lonLabel.className = 'unit-label';
     lonLabel.textContent = 'Lon: ';
     const lonIn = document.createElement('input');
     lonIn.type = 'number';
     lonIn.step = 'any';
     lonIn.value = prof.lon !== undefined ? prof.lon : '';
-    lonIn.style.width = '120px';
-    lonIn.style.padding = '4px';
+    lonIn.className = 'unit-input unit-input-coord';
     lonLabel.appendChild(lonIn);
 
     const btnUpdateLoc = document.createElement('button');
     btnUpdateLoc.textContent = 'Update Position';
-    btnUpdateLoc.style.padding = '6px 12px';
+    btnUpdateLoc.className = 'unit-btn unit-btn-primary';
     btnUpdateLoc.onclick = async () => {
       btnUpdateLoc.disabled = true;
       const lat = parseFloat(latIn.value);
@@ -314,7 +338,7 @@ window.RapidAidUnit = (function() {
 
     const btnGeo = document.createElement('button');
     btnGeo.textContent = 'Use My Browser Location';
-    btnGeo.style.padding = '6px 12px';
+    btnGeo.className = 'unit-btn';
     btnGeo.onclick = () => {
       if (!navigator.geolocation) {
         showInlineError(locBox, 'Browser geolocation not supported');
@@ -341,16 +365,13 @@ window.RapidAidUnit = (function() {
 
     // 3. Kind-Specific Resource Management
     const resBox = document.createElement('div');
-    resBox.style.padding = '12px';
-    resBox.style.marginBottom = '15px';
-    resBox.style.border = '1px solid #ccc';
-    resBox.style.background = '#f9f9f9';
+    resBox.className = 'unit-res-box';
 
     const resources = unitState.resources || {};
 
     if (kind === 'ambulance' || kind === 'fire_truck' || kind === 'police_unit') {
       const resH4 = document.createElement('h4');
-      resH4.style.margin = '0 0 10px 0';
+      resH4.className = 'unit-res-title';
       const countName = (kind === 'ambulance') ? 'Paramedic Crew Count' :
                          (kind === 'fire_truck') ? 'Water Capacity (Litres)' : 'Officer Staffing Count';
       resH4.textContent = countName;
@@ -360,20 +381,17 @@ window.RapidAidUnit = (function() {
                        (kind === 'fire_truck') ? (resources.waterLitres || 0) : (resources.officers || 0);
 
       const d = document.createElement('div');
-      d.style.display = 'flex';
-      d.style.gap = '10px';
-      d.style.alignItems = 'center';
+      d.className = 'unit-controls-row';
 
       const inVal = document.createElement('input');
       inVal.type = 'number';
       inVal.min = '0';
       inVal.value = countVal;
-      inVal.style.width = '100px';
-      inVal.style.padding = '4px';
+      inVal.className = 'unit-input unit-input-count';
 
       const btnUpdRes = document.createElement('button');
       btnUpdRes.textContent = 'Update Resource Count';
-      btnUpdRes.style.padding = '6px 12px';
+      btnUpdRes.className = 'unit-btn unit-btn-primary';
       btnUpdRes.onclick = async () => {
         btnUpdRes.disabled = true;
         const val = parseInt(inVal.value, 10);
@@ -391,31 +409,27 @@ window.RapidAidUnit = (function() {
       container.appendChild(resBox);
     } else if (kind === 'hospital') {
       const resH4 = document.createElement('h4');
-      resH4.style.margin = '0 0 10px 0';
+      resH4.className = 'unit-res-title';
       resH4.textContent = 'Hospital Bed Occupancy & Capacity';
       resBox.appendChild(resH4);
 
       const stats = document.createElement('div');
-      stats.style.marginBottom = '10px';
+      stats.className = 'unit-res-stats';
       stats.textContent = `Total Beds: ${resources.totalBeds || 0} | Occupied: ${resources.occupiedBeds || 0} | Available: ${resources.availableBeds || 0}`;
       resBox.appendChild(stats);
 
       const bedControls = document.createElement('div');
-      bedControls.style.display = 'flex';
-      bedControls.style.gap = '10px';
-      bedControls.style.alignItems = 'center';
-      bedControls.style.flexWrap = 'wrap';
+      bedControls.className = 'unit-controls-row';
 
       const bedIn = document.createElement('input');
       bedIn.type = 'number';
       bedIn.min = '1';
       bedIn.value = '1';
-      bedIn.style.width = '80px';
-      bedIn.style.padding = '4px';
+      bedIn.className = 'unit-input unit-input-count';
 
       const btnAdmit = document.createElement('button');
       btnAdmit.textContent = 'Admit Patients';
-      btnAdmit.style.padding = '6px 12px';
+      btnAdmit.className = 'unit-btn unit-btn-success';
       btnAdmit.onclick = async () => {
         btnAdmit.disabled = true;
         const c = parseInt(bedIn.value, 10) || 0;
@@ -427,7 +441,7 @@ window.RapidAidUnit = (function() {
 
       const btnDischarge = document.createElement('button');
       btnDischarge.textContent = 'Discharge Patients';
-      btnDischarge.style.padding = '6px 12px';
+      btnDischarge.className = 'unit-btn unit-btn-primary';
       btnDischarge.onclick = async () => {
         btnDischarge.disabled = true;
         const c = parseInt(bedIn.value, 10) || 0;
@@ -447,32 +461,27 @@ window.RapidAidUnit = (function() {
       renderSubunitBox(container, 'Owned Hospital Ambulances', 'Add Ambulance', 'Paramedics');
     } else if (kind === 'shelter') {
       const resH4 = document.createElement('h4');
-      resH4.style.margin = '0 0 10px 0';
+      resH4.className = 'unit-res-title';
       resH4.textContent = 'Shelter Capacity & Occupancy';
       resBox.appendChild(resH4);
 
       const stats = document.createElement('div');
-      stats.style.marginBottom = '10px';
+      stats.className = 'unit-res-stats' + (resources.isFull ? ' unit-res-stats-alert' : '');
       stats.textContent = `Capacity: ${resources.capacity || 0} | Occupied: ${resources.occupied || 0} | Available Space: ${resources.availableSpace || 0} | Full: ${resources.isFull ? 'YES' : 'NO'}`;
-      if (resources.isFull) stats.style.color = '#d9534f';
       resBox.appendChild(stats);
 
       const shelterControls = document.createElement('div');
-      shelterControls.style.display = 'flex';
-      shelterControls.style.gap = '10px';
-      shelterControls.style.alignItems = 'center';
-      shelterControls.style.flexWrap = 'wrap';
+      shelterControls.className = 'unit-controls-row';
 
       const sIn = document.createElement('input');
       sIn.type = 'number';
       sIn.min = '1';
       sIn.value = '1';
-      sIn.style.width = '80px';
-      sIn.style.padding = '4px';
+      sIn.className = 'unit-input unit-input-count';
 
       const btnAdmit = document.createElement('button');
       btnAdmit.textContent = 'Admit People';
-      btnAdmit.style.padding = '6px 12px';
+      btnAdmit.className = 'unit-btn unit-btn-success';
       btnAdmit.onclick = async () => {
         btnAdmit.disabled = true;
         const c = parseInt(sIn.value, 10) || 0;
@@ -484,7 +493,7 @@ window.RapidAidUnit = (function() {
 
       const btnLeave = document.createElement('button');
       btnLeave.textContent = 'Depart People';
-      btnLeave.style.padding = '6px 12px';
+      btnLeave.className = 'unit-btn unit-btn-primary';
       btnLeave.onclick = async () => {
         btnLeave.disabled = true;
         const c = parseInt(sIn.value, 10) || 0;
@@ -508,36 +517,31 @@ window.RapidAidUnit = (function() {
 
   function renderSubunitBox(container, title, addTitle, countLabel) {
     const box = document.createElement('div');
-    box.style.padding = '12px';
-    box.style.marginBottom = '15px';
-    box.style.border = '1px solid #ccc';
-    box.style.background = '#f9f9f9';
+    box.className = 'unit-res-box';
 
     const h4 = document.createElement('h4');
-    h4.style.margin = '0 0 10px 0';
+    h4.className = 'unit-res-title';
     h4.textContent = title;
     box.appendChild(h4);
 
     const subunits = unitState.subunits || [];
     if (subunits.length === 0) {
       const p = document.createElement('p');
-      p.style.color = '#777';
+      p.className = 'unit-empty-text';
       p.textContent = 'No child sub-units registered yet.';
       box.appendChild(p);
     } else {
+      const tableWrapper = document.createElement('div');
+      tableWrapper.className = 'unit-table-responsive';
+
       const table = document.createElement('table');
-      table.style.width = '100%';
-      table.style.borderCollapse = 'collapse';
-      table.style.marginBottom = '12px';
-      table.style.fontSize = '13px';
+      table.className = 'unit-table';
 
       const thead = document.createElement('thead');
       const trHead = document.createElement('tr');
-      trHead.style.borderBottom = '2px solid #ccc';
-      trHead.style.textAlign = 'left';
       ['ID', 'Name', countLabel, 'Status', 'Action'].forEach(lbl => {
         const th = document.createElement('th');
-        th.style.padding = '6px';
+        th.className = 'unit-th';
         th.textContent = lbl;
         trHead.appendChild(th);
       });
@@ -547,32 +551,31 @@ window.RapidAidUnit = (function() {
       const tbody = document.createElement('tbody');
       subunits.forEach(sub => {
         const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid #eee';
 
         const tdId = document.createElement('td');
-        tdId.style.padding = '6px';
+        tdId.className = 'unit-td';
         tdId.textContent = sub.id;
 
         const tdName = document.createElement('td');
-        tdName.style.padding = '6px';
+        tdName.className = 'unit-td';
         tdName.textContent = sub.name;
 
         const tdCount = document.createElement('td');
-        tdCount.style.padding = '6px';
+        tdCount.className = 'unit-td';
         tdCount.textContent = sub.count;
 
         const tdStat = document.createElement('td');
-        tdStat.style.padding = '6px';
-        tdStat.textContent = sub.status || (sub.available ? 'Available' : 'Unavailable');
-        tdStat.style.fontWeight = 'bold';
-        tdStat.style.color = sub.available ? '#28a745' : '#dc3545';
+        tdStat.className = 'unit-td';
+        const spStat = document.createElement('span');
+        spStat.textContent = sub.status || (sub.available ? 'Available' : 'Unavailable');
+        spStat.className = 'status-chip status-chip-' + (sub.available ? 'active' : 'disabled');
+        tdStat.appendChild(spStat);
 
         const tdAct = document.createElement('td');
-        tdAct.style.padding = '6px';
+        tdAct.className = 'unit-td';
         const btnToggle = document.createElement('button');
         btnToggle.textContent = sub.available ? 'Make Unavailable' : 'Make Available';
-        btnToggle.style.padding = '3px 8px';
-        btnToggle.style.fontSize = '12px';
+        btnToggle.className = 'unit-btn';
         btnToggle.onclick = async () => {
           btnToggle.disabled = true;
           const r = await callBridge('unit_set_subunit_availability', { subunitId: sub.id, available: !sub.available });
@@ -589,32 +592,29 @@ window.RapidAidUnit = (function() {
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
-      box.appendChild(table);
+      tableWrapper.appendChild(table);
+      box.appendChild(tableWrapper);
     }
 
     // Add Form
     const addContainer = document.createElement('div');
-    addContainer.style.display = 'flex';
-    addContainer.style.gap = '8px';
-    addContainer.style.alignItems = 'center';
-    addContainer.style.flexWrap = 'wrap';
+    addContainer.className = 'unit-controls-row';
 
     const nameIn = document.createElement('input');
     nameIn.type = 'text';
     nameIn.placeholder = 'Subunit Name (e.g. Unit 1)';
-    nameIn.style.padding = '4px 8px';
+    nameIn.className = 'unit-input';
 
     const countIn = document.createElement('input');
     countIn.type = 'number';
     countIn.placeholder = countLabel;
     countIn.min = '0';
     countIn.value = '1';
-    countIn.style.width = '100px';
-    countIn.style.padding = '4px 8px';
+    countIn.className = 'unit-input unit-input-count';
 
     const btnAdd = document.createElement('button');
     btnAdd.textContent = addTitle;
-    btnAdd.style.padding = '5px 12px';
+    btnAdd.className = 'unit-btn unit-btn-primary';
     btnAdd.onclick = async () => {
       const sname = nameIn.value.trim();
       const scount = parseInt(countIn.value, 10) || 0;
@@ -703,22 +703,15 @@ window.RapidAidUnit = (function() {
 
     const noBox = document.createElement('div');
     noBox.id = 'unit-no-alert-box';
-    noBox.style.padding = '25px';
-    noBox.style.textAlign = 'center';
-    noBox.style.background = '#f0f9ff';
-    noBox.style.border = '1px solid #b8daff';
-    noBox.style.borderRadius = '4px';
-    noBox.style.marginBottom = '20px';
+    noBox.className = 'unit-empty-box';
 
     const noH3 = document.createElement('h3');
-    noH3.style.color = '#004085';
-    noH3.style.margin = '0 0 5px 0';
+    noH3.className = 'unit-empty-title';
     noH3.textContent = 'No Active Dispatch Alert';
     noBox.appendChild(noH3);
 
     const noP = document.createElement('p');
-    noP.style.margin = '0';
-    noP.style.color = '#555';
+    noP.className = 'unit-empty-text';
     noP.textContent = 'Unit is on standby. Incoming dispatches will sound an audible alarm and appear here.';
     noBox.appendChild(noP);
     slot.appendChild(noBox);
@@ -729,44 +722,30 @@ window.RapidAidUnit = (function() {
 
     const card = document.createElement('div');
     card.id = 'unit-active-alert-card';
-    card.style.padding = '20px';
-    card.style.border = '2px solid #d9534f';
-    card.style.borderRadius = '6px';
-    card.style.background = (openA.state === 'Pending') ? '#fff3cd' : '#ffffff';
-    card.style.boxShadow = '0 2px 6px rgba(0,0,0,0.1)';
-    card.style.marginBottom = '25px';
+    card.className = 'unit-alert-card' + (openA.state === 'Pending' ? ' unit-alert-card-pending' : '');
 
     const cardHead = document.createElement('div');
-    cardHead.style.display = 'flex';
-    cardHead.style.justifyContent = 'space-between';
-    cardHead.style.alignItems = 'center';
-    cardHead.style.marginBottom = '12px';
+    cardHead.className = 'unit-alert-header';
 
     const cTitle = document.createElement('h3');
     cTitle.id = 'unit-alert-title';
-    cTitle.style.margin = '0';
-    cTitle.style.color = '#a71d2a';
+    cTitle.className = 'unit-alert-title';
     cTitle.textContent = `Active Dispatch Alert #${openA.id} [${openA.state}]`;
     cardHead.appendChild(cTitle);
 
     const timerSpan = document.createElement('span');
     timerSpan.id = 'unit-alert-timer';
-    timerSpan.style.fontWeight = 'bold';
-    timerSpan.style.fontSize = '14px';
     updateTimerSpan(timerSpan, openA);
     cardHead.appendChild(timerSpan);
     card.appendChild(cardHead);
 
     const detailsGrid = document.createElement('div');
     detailsGrid.id = 'unit-alert-details-grid';
-    detailsGrid.style.display = 'grid';
-    detailsGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(200px, 1fr))';
-    detailsGrid.style.gap = '10px';
-    detailsGrid.style.marginBottom = '15px';
+    detailsGrid.className = 'unit-details-grid';
 
     const addField = (lbl, val, fieldId = '') => {
       const p = document.createElement('p');
-      p.style.margin = '0';
+      p.className = 'unit-detail-item';
       if (fieldId) p.id = fieldId;
       const st = document.createElement('strong');
       st.textContent = lbl + ': ';
@@ -834,21 +813,12 @@ window.RapidAidUnit = (function() {
 
     const mapDiv = document.createElement('div');
     mapDiv.id = 'unit-alert-map';
-    mapDiv.style.height = '200px';
-    mapDiv.style.width = '100%';
-    mapDiv.style.marginTop = '10px';
-    mapDiv.style.marginBottom = '15px';
-    mapDiv.style.borderRadius = '4px';
-    mapDiv.style.border = '1px solid #ccc';
-    mapDiv.style.background = '#f0f0f0';
+    mapDiv.className = 'unit-map';
     card.appendChild(mapDiv);
 
     const btnRow = document.createElement('div');
     btnRow.id = 'unit-alert-buttons';
-    btnRow.style.display = 'flex';
-    btnRow.style.gap = '10px';
-    btnRow.style.flexWrap = 'wrap';
-    btnRow.style.alignItems = 'center';
+    btnRow.className = 'unit-btn-row';
     card.appendChild(btnRow);
 
     slot.appendChild(card);
@@ -859,94 +829,88 @@ window.RapidAidUnit = (function() {
   }
 
   function initAlertMap(mapDiv, openA) {
-    if (typeof L === 'undefined' || !L.map) return;
+    if (typeof L === 'undefined') return;
 
     try {
-      const alertMap = L.map(mapDiv, { preferCanvas: true });
+      const alertMap = L.map(mapDiv, {
+        zoomControl: false,
+        attributionControl: false
+      }).setView([openA.lat || 0, openA.lon || 0], 14);
 
-      let tileUrl = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
-      const key = (typeof localStorage !== 'undefined') ? (localStorage.getItem('rapidaid_carto_api_key') || '') : '';
-      if (key) {
-        tileUrl += `?key=${encodeURIComponent(key)}`;
-      }
-      L.tileLayer(tileUrl, {
-        maxZoom: 19,
-        subdomains: 'abcd',
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19
       }).addTo(alertMap);
 
-      const layersToFit = [];
+      const bounds = [];
 
-      currentPolyline = null;
-      if (Array.isArray(openA.routeCoordinates) && openA.routeCoordinates.length > 0) {
-        const latLngs = openA.routeCoordinates.map(pt => {
-          if (Array.isArray(pt)) {
-            return [Number(pt[1]), Number(pt[0])];
-          } else if (pt && typeof pt === 'object') {
-            return [Number(pt.lat), Number(pt.lon)];
-          }
-          return pt;
-        }).filter(coord => Array.isArray(coord) && !isNaN(coord[0]) && !isNaN(coord[1]));
+      // Destination Incident Marker
+      if (openA.lat !== undefined && openA.lon !== undefined && openA.lat !== null && openA.lon !== null) {
+        const destIcon = L.divIcon({
+          className: 'unit-dest-marker',
+          html: '<div style="background:#dc3545; color:white; border-radius:50%; width:24px; height:24px; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:12px; border:2px solid white; box-shadow:0 1px 4px rgba(0,0,0,0.4);">!</div>',
+          iconSize: [24, 24],
+          iconAnchor: [12, 12]
+        });
+
+        currentIncidentMarker = L.marker([openA.lat, openA.lon], { icon: destIcon }).addTo(alertMap);
+        const popupDiv = document.createElement('div');
+        const boldP = document.createElement('strong');
+        boldP.textContent = 'Incident Destination:';
+        popupDiv.appendChild(boldP);
+        popupDiv.appendChild(document.createElement('br'));
+        const locSpan = document.createElement('span');
+        locSpan.textContent = openA.locationText;
+        popupDiv.appendChild(locSpan);
+        currentIncidentMarker.bindPopup(popupDiv);
+
+        bounds.push([openA.lat, openA.lon]);
+      }
+
+      // Unit Origin Marker
+      const prof = unitState ? unitState.profile : null;
+      if (prof && prof.lat !== undefined && prof.lon !== undefined && prof.lat !== null && prof.lon !== null) {
+        const unitIcon = L.divIcon({
+          className: 'unit-origin-marker',
+          html: '<div style="background:#28a745; color:white; border-radius:50%; width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:10px; border:2px solid white; box-shadow:0 1px 4px rgba(0,0,0,0.4);">U</div>',
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        });
+
+        L.marker([prof.lat, prof.lon], { icon: unitIcon })
+          .addTo(alertMap)
+          .bindPopup('Your Current Position');
+
+        bounds.push([prof.lat, prof.lon]);
+      }
+
+      // Route polyline (server coordinates [lon, lat] converted to [lat, lon])
+      if (openA.route) {
+        let latLngs = [];
+        if (Array.isArray(openA.route.coordinates)) {
+          latLngs = openA.route.coordinates.map(c => [c[1], c[0]]);
+        } else if (openA.route.geometry && Array.isArray(openA.route.geometry.coordinates)) {
+          latLngs = openA.route.geometry.coordinates.map(c => [c[1], c[0]]);
+        }
 
         if (latLngs.length > 0) {
-          currentPolyline = L.polyline(latLngs, { color: '#0066cc', weight: 4 }).addTo(alertMap);
-          layersToFit.push(currentPolyline);
+          currentPolyline = L.polyline(latLngs, {
+            color: '#0066cc',
+            weight: 4,
+            opacity: 0.85
+          }).addTo(alertMap);
+          latLngs.forEach(ll => bounds.push(ll));
         }
       }
 
-      currentIncidentMarker = null;
-      let incLat = (openA.lat !== undefined && openA.lat !== null) ? Number(openA.lat) : null;
-      let incLon = (openA.lon !== undefined && openA.lon !== null) ? Number(openA.lon) : null;
-
-      if ((incLat === null || isNaN(incLat)) && Array.isArray(openA.routeCoordinates) && openA.routeCoordinates.length > 0) {
-        const lastPt = openA.routeCoordinates[openA.routeCoordinates.length - 1];
-        if (Array.isArray(lastPt)) {
-          incLon = Number(lastPt[0]);
-          incLat = Number(lastPt[1]);
-        } else if (lastPt && typeof lastPt === 'object') {
-          incLat = Number(lastPt.lat);
-          incLon = Number(lastPt.lon);
-        }
-      }
-
-      if (incLat !== null && !isNaN(incLat) && incLon !== null && !isNaN(incLon)) {
-        currentIncidentMarker = L.marker([incLat, incLon]).addTo(alertMap);
-        const popupDiv = document.createElement('div');
-        const b = document.createElement('strong');
-        b.textContent = 'Incident Location';
-        popupDiv.appendChild(b);
-        if (openA.locationText) {
-          popupDiv.appendChild(document.createElement('br'));
-          const locSpan = document.createElement('span');
-          locSpan.textContent = openA.locationText;
-          popupDiv.appendChild(locSpan);
-        }
-        currentIncidentMarker.bindPopup(popupDiv);
-        layersToFit.push(currentIncidentMarker);
-      }
-
-      if (layersToFit.length > 0) {
-        const group = L.featureGroup(layersToFit);
-        const bounds = group.getBounds();
-        if (bounds.isValid()) {
-          if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
-            alertMap.setView(bounds.getNorthEast(), 14);
-          } else {
-            alertMap.fitBounds(bounds.pad(0.1));
-          }
-        }
-      } else {
-        const prof = (unitState && unitState.profile) ? unitState.profile : {};
-        const uLat = prof.lat !== undefined ? Number(prof.lat) : 48.8583;
-        const uLon = prof.lon !== undefined ? Number(prof.lon) : 2.2945;
-        alertMap.setView([uLat, uLon], 14);
+      if (bounds.length > 1) {
+        alertMap.fitBounds(bounds, { padding: [25, 25] });
+      } else if (bounds.length === 1) {
+        alertMap.setView(bounds[0], 15);
       }
 
       setTimeout(() => {
-        try {
-          alertMap.invalidateSize();
-        } catch (e) {}
-      }, 150);
+        try { alertMap.invalidateSize(); } catch (e) {}
+      }, 250);
 
       currentAlertMap = alertMap;
     } catch (err) {
@@ -958,7 +922,11 @@ window.RapidAidUnit = (function() {
     const card = document.getElementById('unit-active-alert-card');
     if (!card) return;
 
-    card.style.background = (openA.state === 'Pending') ? '#fff3cd' : '#ffffff';
+    if (openA.state === 'Pending') {
+      card.classList.add('unit-alert-card-pending');
+    } else {
+      card.classList.remove('unit-alert-card-pending');
+    }
 
     const cTitle = document.getElementById('unit-alert-title');
     if (cTitle) {
@@ -1010,14 +978,14 @@ window.RapidAidUnit = (function() {
       const secs = openA.secondsLeft !== undefined ? openA.secondsLeft : 60;
       if (secs <= 0) {
         timerSpan.textContent = 'Acknowledge: OVERDUE (0s)';
-        timerSpan.style.color = '#dc3545';
+        timerSpan.className = 'unit-alert-timer unit-alert-timer-urgent';
       } else {
         timerSpan.textContent = `Acknowledge in: ${secs}s`;
-        timerSpan.style.color = '#d39e00';
+        timerSpan.className = 'unit-alert-timer ' + (secs < 30 ? 'unit-alert-timer-urgent' : 'unit-alert-timer-warn');
       }
     } else {
       timerSpan.textContent = `State: ${openA.state}`;
-      timerSpan.style.color = '#28a745';
+      timerSpan.className = 'unit-alert-timer unit-alert-timer-normal';
     }
   }
 
@@ -1036,23 +1004,12 @@ window.RapidAidUnit = (function() {
     if (openA.state === 'Pending') {
       const btnAccept = document.createElement('button');
       btnAccept.textContent = 'Accept Dispatch';
-      btnAccept.style.padding = '8px 18px';
-      btnAccept.style.fontWeight = 'bold';
-      btnAccept.style.background = '#28a745';
-      btnAccept.style.color = '#ffffff';
-      btnAccept.style.border = 'none';
-      btnAccept.style.borderRadius = '3px';
-      btnAccept.style.cursor = 'pointer';
+      btnAccept.className = 'unit-btn unit-btn-accept unit-btn-success';
       btnAccept.onclick = () => sendResp('accept');
 
       const btnDecline = document.createElement('button');
       btnDecline.textContent = 'Decline Dispatch';
-      btnDecline.style.padding = '8px 14px';
-      btnDecline.style.background = '#dc3545';
-      btnDecline.style.color = '#ffffff';
-      btnDecline.style.border = 'none';
-      btnDecline.style.borderRadius = '3px';
-      btnDecline.style.cursor = 'pointer';
+      btnDecline.className = 'unit-btn unit-btn-decline unit-btn-danger';
       btnDecline.onclick = () => {
         const reason = prompt('Optional reason for declining dispatch:') || '';
         sendResp('decline', reason);
@@ -1064,47 +1021,50 @@ window.RapidAidUnit = (function() {
       if (kind === 'ambulance' || kind === 'fire_truck' || kind === 'police_unit') {
         const btnEnRoute = document.createElement('button');
         btnEnRoute.textContent = 'Mark En Route';
-        btnEnRoute.style.padding = '8px 16px';
-        btnEnRoute.style.fontWeight = 'bold';
+        btnEnRoute.className = 'unit-btn unit-btn-enroute unit-btn-primary';
         btnEnRoute.onclick = () => sendResp('en_route');
         btnRow.appendChild(btnEnRoute);
       }
       const btnClear = document.createElement('button');
       btnClear.textContent = 'Clear Alert';
-      btnClear.style.padding = '8px 16px';
+      btnClear.className = 'unit-btn unit-btn-clear';
       btnClear.onclick = () => sendResp('clear');
       btnRow.appendChild(btnClear);
     } else if (openA.state === 'EnRoute') {
       const btnOnScene = document.createElement('button');
       btnOnScene.textContent = 'Mark On Scene';
-      btnOnScene.style.padding = '8px 16px';
-      btnOnScene.style.fontWeight = 'bold';
+      btnOnScene.className = 'unit-btn unit-btn-onscene unit-btn-primary';
       btnOnScene.onclick = () => sendResp('on_scene');
       btnRow.appendChild(btnOnScene);
 
       const btnClear = document.createElement('button');
       btnClear.textContent = 'Clear Alert';
-      btnClear.style.padding = '8px 16px';
+      btnClear.className = 'unit-btn unit-btn-clear';
       btnClear.onclick = () => sendResp('clear');
       btnRow.appendChild(btnClear);
     } else if (openA.state === 'OnScene') {
       if (kind === 'ambulance') {
         const btnTrans = document.createElement('button');
         btnTrans.textContent = 'Transporting Patient';
-        btnTrans.style.padding = '8px 16px';
-        btnTrans.style.fontWeight = 'bold';
+        btnTrans.className = 'unit-btn unit-btn-transporting unit-btn-primary';
         btnTrans.onclick = () => sendResp('transporting');
         btnRow.appendChild(btnTrans);
       }
       const btnClear = document.createElement('button');
       btnClear.textContent = 'Clear Alert';
-      btnClear.style.padding = '8px 16px';
+      btnClear.className = 'unit-btn unit-btn-clear';
       btnClear.onclick = () => sendResp('clear');
       btnRow.appendChild(btnClear);
     } else if (openA.state === 'Transporting') {
       const btnClear = document.createElement('button');
       btnClear.textContent = 'Clear Alert';
-      btnClear.style.padding = '8px 16px';
+      btnClear.className = 'unit-btn unit-btn-clear';
+      btnClear.onclick = () => sendResp('clear');
+      btnRow.appendChild(btnClear);
+    } else {
+      const btnClear = document.createElement('button');
+      btnClear.textContent = 'Clear Alert';
+      btnClear.className = 'unit-btn unit-btn-clear';
       btnClear.onclick = () => sendResp('clear');
       btnRow.appendChild(btnClear);
     }
@@ -1112,31 +1072,29 @@ window.RapidAidUnit = (function() {
 
   function renderHistoryTable(slot) {
     slot.textContent = '';
-    slot.style.marginTop = '25px';
-
     const h4 = document.createElement('h4');
+    h4.className = 'unit-res-title';
     h4.textContent = 'Recent Closed Dispatches (Last 5)';
     slot.appendChild(h4);
 
     const recents = (unitState && unitState.recentAlerts) ? unitState.recentAlerts : [];
     if (recents.length === 0) {
       const p = document.createElement('p');
-      p.style.color = '#777';
+      p.className = 'unit-empty-text';
       p.textContent = 'No past closed alerts.';
       slot.appendChild(p);
     } else {
+      const tableWrapper = document.createElement('div');
+      tableWrapper.className = 'unit-table-responsive';
+
       const table = document.createElement('table');
-      table.style.width = '100%';
-      table.style.borderCollapse = 'collapse';
-      table.style.fontSize = '13px';
+      table.className = 'unit-table';
 
       const thead = document.createElement('thead');
       const trHead = document.createElement('tr');
-      trHead.style.borderBottom = '2px solid #ccc';
-      trHead.style.textAlign = 'left';
       ['ID', 'Type', 'Severity', 'Location', 'Final State', 'Reason'].forEach(txt => {
         const th = document.createElement('th');
-        th.style.padding = '6px';
+        th.className = 'unit-th';
         th.textContent = txt;
         trHead.appendChild(th);
       });
@@ -1146,12 +1104,19 @@ window.RapidAidUnit = (function() {
       const tbody = document.createElement('tbody');
       recents.forEach(a => {
         const tr = document.createElement('tr');
-        tr.style.borderBottom = '1px solid #eee';
 
-        const addTd = val => {
+        const addTd = (val, isState = false) => {
           const td = document.createElement('td');
-          td.style.padding = '6px';
-          td.textContent = val !== undefined && val !== null ? val : '';
+          td.className = 'unit-td';
+          if (isState) {
+            const spState = document.createElement('span');
+            spState.textContent = val !== undefined && val !== null ? val : '';
+            const cleanState = String(val || '').toLowerCase().replace(/[\s_]+/g, '');
+            spState.className = 'status-chip status-chip-' + cleanState;
+            td.appendChild(spState);
+          } else {
+            td.textContent = val !== undefined && val !== null ? val : '';
+          }
           tr.appendChild(td);
         };
 
@@ -1159,12 +1124,13 @@ window.RapidAidUnit = (function() {
         addTd(a.type);
         addTd(a.severity);
         addTd(a.locationText);
-        addTd(a.state);
+        addTd(a.state, true);
         addTd(a.reason || 'N/A');
         tbody.appendChild(tr);
       });
       table.appendChild(tbody);
-      slot.appendChild(table);
+      tableWrapper.appendChild(table);
+      slot.appendChild(tableWrapper);
     }
   }
 
@@ -1177,11 +1143,7 @@ window.RapidAidUnit = (function() {
     let errDiv = parent.querySelector('.unit-inline-error');
     if (!errDiv) {
       errDiv = document.createElement('div');
-      errDiv.className = 'unit-inline-error';
-      errDiv.style.marginTop = '8px';
-      errDiv.style.color = '#dc3545';
-      errDiv.style.fontWeight = 'bold';
-      errDiv.style.fontSize = '13px';
+      errDiv.className = 'unit-inline-error unit-feedback-err';
       parent.appendChild(errDiv);
     }
     errDiv.textContent = message;

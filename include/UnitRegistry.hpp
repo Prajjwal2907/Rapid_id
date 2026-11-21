@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <vector>
 
+class Auth;
+
 namespace rapidaid::ui {
 
 /**
@@ -69,6 +71,7 @@ struct Alert {
     std::string role; // "primary", "standby", "support"
     double distanceMeters{0.0};
     std::vector<std::vector<double>> routeCoordinates; // [[lon, lat], ...]
+    int64_t ackedAt{0};
 };
 
 /**
@@ -260,9 +263,10 @@ public:
 
     /**
      * @brief Lists all registered units with summary metrics for dispatchers.
+     * @param auth Optional pointer to Auth instance for filtering inactive accounts.
      * @return JSON response object containing array of units. Never throws.
      */
-    nlohmann::ordered_json listUnitsJson();
+    nlohmann::ordered_json listUnitsJson(const Auth* auth = nullptr);
 
     /**
      * @brief Issues a test dispatch alert to an eligible unit.
@@ -290,13 +294,20 @@ public:
     nlohmann::ordered_json listAlertsJson() const;
 
     /**
+     * @brief Retrieves all alerts currently tracked in memory.
+     * @return Const reference to internal alerts vector. Never throws.
+     */
+    const std::vector<Alert>& allAlerts() const { return alerts_; }
+
+    /**
      * @brief Collects and evaluates all registered units as dispatch candidates against the graph.
      * @param graph Road network graph used to locate nearest road nodes.
+     * @param auth Optional pointer to Auth instance for filtering inactive accounts.
      * @return Vector of Candidate objects. Never throws.
      * Failure behavior: For units further than 1500m from any graph node or if nearestNode returns -1,
      * candidate nodeIndex is set to -1.
      */
-    std::vector<rapidaid::dispatch::Candidate> listCandidates(const rapidaid::graph::Graph& graph);
+    std::vector<rapidaid::dispatch::Candidate> listCandidates(const rapidaid::graph::Graph& graph, const Auth* auth = nullptr);
 
     /**
      * @brief Creates and sends an incident dispatch alert to a specific unit.
@@ -380,6 +391,8 @@ private:
     std::vector<Alert> alerts_;
     int nextAlertId_{1};
     bool loaded_{false};
+    mutable bool unitsCorrupt_{false};
+    mutable bool alertsCorrupt_{false};
 
     void reinstantiateMobile(RegisteredUnitRecord& rec, int newCount);
     std::string getAlertsPath(const std::string& target) const;

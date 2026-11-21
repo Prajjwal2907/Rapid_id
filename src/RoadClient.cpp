@@ -1,5 +1,6 @@
-﻿#include "RoadClient.hpp"
+#include "RoadClient.hpp"
 #include "HttpClient.hpp"
+#include "OverpassEndpoint.hpp"
 #include "json.hpp"
 
 #include <chrono>
@@ -36,7 +37,11 @@ std::string RoadClient::buildRoadQuery(double lat, double lon, int radiusMeters)
 }
 
 std::string RoadClient::buildRequestBody(const std::string& query) {
-    return "data=" + rapidaid::net::HttpClient::urlEncode(query);
+    std::string encoded = rapidaid::net::HttpClient::urlEncode(query);
+    if (encoded.empty() && !query.empty()) {
+        return "";
+    }
+    return "data=" + encoded;
 }
 
 std::string RoadClient::fetchRaw(double lat, double lon, int radiusMeters) {
@@ -53,8 +58,9 @@ std::string RoadClient::fetchRaw(double lat, double lon, int radiusMeters) {
     }
 
     std::string body = buildRequestBody(query);
-
-    static const std::string overpassUrl = "https://overpass-api.de/api/interpreter";
+    if (body.empty()) {
+        return "";
+    }
 
     std::string response;
     const int maxAttempts = 3;
@@ -64,7 +70,8 @@ std::string RoadClient::fetchRaw(double lat, double lon, int radiusMeters) {
     };
 
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        response = rapidaid::net::HttpClient::post(overpassUrl, body);
+        const char* endpoint = (attempt < 2) ? rapidaid::net::kOverpassPrimaryUrl : rapidaid::net::kOverpassFallbackUrl;
+        response = rapidaid::net::HttpClient::post(endpoint, body);
         if (!response.empty()) {
             return response;
         }

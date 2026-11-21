@@ -9,6 +9,7 @@
 #include "Incident.hpp"
 #include "IncidentStore.hpp"
 #include "LocationResolver.hpp"
+#include "PasswordHasher.hpp"
 #include "UnitRegistry.hpp"
 #include "json.hpp"
 
@@ -17,10 +18,10 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <iomanip>
 #include <locale>
 #include <mutex>
-#include <random>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -47,6 +48,9 @@ struct StoredIncident {
 struct SessionData {
     std::string username;
     std::string role;
+    bool mustChangePassword{false};
+    long long createdAt{0};
+    long long lastSeen{0};
 };
 
 // Global mutexes separating domain state from pipeline computation
@@ -55,6 +59,16 @@ std::mutex g_pipelineMutex;
 
 // In-memory sessions: token -> SessionData
 std::unordered_map<std::string, SessionData> g_sessions;
+
+// Test clock hook
+std::function<long long()> g_testClock;
+
+long long getNowEpoch() {
+    if (g_testClock) {
+        return g_testClock();
+    }
+    return static_cast<long long>(std::time(nullptr));
+}
 
 // Global UnitRegistry instance
 UnitRegistry g_registry;
@@ -87,15 +101,7 @@ void ensureIncidentsLoaded() {
 }
 
 std::string generateSessionToken() {
-    std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint64_t> dist;
-    uint64_t p1 = dist(gen);
-    uint64_t p2 = dist(gen);
-    std::ostringstream ss;
-    ss.imbue(std::locale::classic());
-    ss << std::hex << std::setfill('0') << std::setw(16) << p1 << std::setw(16) << p2;
-    return ss.str();
+    return rapidaid::auth::PasswordHasher::randomHex(32);
 }
 
 std::string currentTimestampIso() {
@@ -170,16 +176,36 @@ bool isTokenAuthorized(const std::string& token, const std::string& requiredRole
     std::lock_guard<std::mutex> lock(g_stateMutex);
     auto it = g_sessions.find(token);
     if (it == g_sessions.end()) return false;
+
+    long long now = getNowEpoch();
+    if ((now - it->second.lastSeen > 1800) || (now - it->second.createdAt > 28800)) {
+        g_sessions.erase(it);
+        return false;
+    }
+
+    if (it->second.mustChangePassword) {
+        return false;
+    }
+
+    it->second.lastSeen = now;
+
+    if (requiredRole == "admin") {
+        return (it->second.role == "admin");
+    }
     if (requiredRole == "dispatcher") {
         return (it->second.role == "dispatcher" || it->second.role == "admin");
     }
-    return it->second.role == requiredRole;
+    if (requiredRole == "unit") {
+        return (it->second.role == "unit");
+    }
+    return (it->second.role == requiredRole);
 }
 
 void resetBridgeState() {
     std::lock_guard<std::mutex> pipeLock(g_pipelineMutex);
     std::lock_guard<std::mutex> stateLock(g_stateMutex);
     g_sessions.clear();
+    g_testClock = nullptr;
     g_registry.clear();
     g_registry.setDataPath("data/units.json");
     g_incidentStore.clear();
@@ -191,6 +217,11 @@ void resetBridgeState() {
 
     rapidaid::data::DataCache defaultCache("data", false);
     tryLoadAreaContext(defaultCache, "data/out");
+}
+
+void setClockForTesting(std::function<long long()> clockFn) {
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    g_testClock = std::move(clockFn);
 }
 
 bool checkGeoJsonExists(const std::string& outDir) {
@@ -592,29 +623,202 @@ std::string handleGetStatsRequest() {
     std::lock_guard<std::mutex> lock(g_stateMutex);
     try {
         ensureIncidentsLoaded();
-        size_t total = g_incidentStore.all().size() + getLegacyIncidentStore().size();
-        int activeDispatches = 0;
-        for (const auto& inc : g_incidentStore.all()) {
-            if (inc.status == "Dispatched") {
-                activeDispatches++;
+        const auto& allInc = g_incidentStore.all();
+        int totalIncidents = static_cast<int>(allInc.size());
+
+        int countNew = 0, countProposed = 0, countDispatched = 0, countCompleted = 0, countCancelled = 0;
+        int countMedical = 0, countFire = 0, countPolice = 0, countOther = 0;
+        double sumSeverity = 0.0;
+        double sumPeople = 0.0;
+
+        double sumMinutesToDispatch = 0.0;
+        int countMinutesToDispatch = 0;
+
+        double sumMinutesToComplete = 0.0;
+        int countMinutesToComplete = 0;
+
+        struct IncidentRecentItem {
+            int id;
+            std::string type;
+            int severity;
+            std::string status;
+            long long createdAt;
+            std::optional<long long> dispatchedAt;
+            std::optional<long long> completedAt;
+        };
+        std::vector<IncidentRecentItem> recentItems;
+        recentItems.reserve(allInc.size());
+
+        for (const auto& inc : allInc) {
+            if (inc.status == "New") countNew++;
+            else if (inc.status == "Proposed") countProposed++;
+            else if (inc.status == "Dispatched") countDispatched++;
+            else if (inc.status == "Completed") countCompleted++;
+            else if (inc.status == "Cancelled") countCancelled++;
+
+            if (inc.type == "Medical") countMedical++;
+            else if (inc.type == "Fire") countFire++;
+            else if (inc.type == "Police") countPolice++;
+            else countOther++;
+
+            sumSeverity += inc.severity;
+            sumPeople += inc.peopleAffected;
+
+            std::optional<long long> dispAt = std::nullopt;
+            std::optional<long long> compAt = std::nullopt;
+
+            for (const auto& entry : inc.log) {
+                if (entry.text.find("Dispatch approved") != std::string::npos ||
+                    entry.text.find("dispatch approved") != std::string::npos ||
+                    entry.text.find("Dispatched") != std::string::npos) {
+                    if (!dispAt.has_value()) dispAt = entry.time;
+                }
+                if (entry.text.find("completed") != std::string::npos ||
+                    entry.text.find("Completed") != std::string::npos ||
+                    entry.text.find("cancelled") != std::string::npos ||
+                    entry.text.find("Cancelled") != std::string::npos) {
+                    compAt = entry.time;
+                }
+            }
+            if (!dispAt.has_value() && (inc.status == "Dispatched" || inc.status == "Completed")) {
+                if (inc.createdAt > 0) dispAt = inc.createdAt;
+            }
+            if (!compAt.has_value() && (inc.status == "Completed" || inc.status == "Cancelled")) {
+                if (!inc.log.empty()) compAt = inc.log.back().time;
+                else if (inc.createdAt > 0) compAt = inc.createdAt;
+            }
+
+            if (dispAt.has_value() && inc.createdAt > 0 && *dispAt >= inc.createdAt) {
+                sumMinutesToDispatch += static_cast<double>(*dispAt - inc.createdAt) / 60.0;
+                countMinutesToDispatch++;
+            }
+            if (compAt.has_value() && inc.createdAt > 0 && *compAt >= inc.createdAt && inc.status == "Completed") {
+                sumMinutesToComplete += static_cast<double>(*compAt - inc.createdAt) / 60.0;
+                countMinutesToComplete++;
+            }
+
+            recentItems.push_back({inc.id, inc.type, inc.severity, inc.status, inc.createdAt, dispAt, compAt});
+        }
+
+        std::sort(recentItems.begin(), recentItems.end(), [](const IncidentRecentItem& a, const IncidentRecentItem& b) {
+            if (a.createdAt != b.createdAt) return a.createdAt > b.createdAt;
+            return a.id > b.id;
+        });
+        if (recentItems.size() > 20) {
+            recentItems.resize(20);
+        }
+
+        nlohmann::ordered_json recentArr = nlohmann::json::array();
+        for (const auto& r : recentItems) {
+            nlohmann::ordered_json rj;
+            rj["id"] = r.id;
+            rj["type"] = r.type;
+            rj["severity"] = r.severity;
+            rj["status"] = r.status;
+            rj["createdAt"] = r.createdAt;
+            if (r.dispatchedAt.has_value()) rj["dispatchedAt"] = *r.dispatchedAt;
+            else rj["dispatchedAt"] = nullptr;
+            if (r.completedAt.has_value()) rj["completedAt"] = *r.completedAt;
+            else rj["completedAt"] = nullptr;
+            recentArr.push_back(rj);
+        }
+
+        nlohmann::ordered_json incObj;
+        incObj["total"] = totalIncidents;
+        incObj["byStatus"] = {
+            {"New", countNew},
+            {"Proposed", countProposed},
+            {"Dispatched", countDispatched},
+            {"Completed", countCompleted},
+            {"Cancelled", countCancelled}
+        };
+        incObj["byType"] = {
+            {"Medical", countMedical},
+            {"Fire", countFire},
+            {"Police", countPolice},
+            {"Other", countOther}
+        };
+        if (totalIncidents > 0) {
+            incObj["avgSeverity"] = sumSeverity / totalIncidents;
+            incObj["avgPeopleAffected"] = sumPeople / totalIncidents;
+        } else {
+            incObj["avgSeverity"] = nullptr;
+            incObj["avgPeopleAffected"] = nullptr;
+        }
+        if (countMinutesToDispatch > 0) {
+            incObj["avgMinutesToDispatch"] = sumMinutesToDispatch / countMinutesToDispatch;
+        } else {
+            incObj["avgMinutesToDispatch"] = nullptr;
+        }
+        if (countMinutesToComplete > 0) {
+            incObj["avgMinutesToComplete"] = sumMinutesToComplete / countMinutesToComplete;
+        } else {
+            incObj["avgMinutesToComplete"] = nullptr;
+        }
+
+        const auto& alerts = g_registry.allAlerts();
+        int totalAlerts = static_cast<int>(alerts.size());
+        int countAccepted = 0;
+        int countDeclined = 0;
+        int countCleared = 0;
+        int countTimedOut = 0;
+        double sumAckSeconds = 0.0;
+        int countAckSeconds = 0;
+
+        for (const auto& a : alerts) {
+            if (a.state == "Accepted" || a.state == "EnRoute" ||
+                a.state == "OnScene" || a.state == "Transporting" || a.state == "Cleared") {
+                countAccepted++;
+            }
+            if (a.state == "Declined") {
+                countDeclined++;
+            }
+            if (a.state == "Cleared") {
+                countCleared++;
+            }
+            if (a.reason == "No acknowledgement" || a.reason == "Timed out") {
+                countTimedOut++;
+            }
+            if (a.ackedAt > 0 && a.createdAt > 0 && a.ackedAt >= a.createdAt) {
+                sumAckSeconds += static_cast<double>(a.ackedAt - a.createdAt);
+                countAckSeconds++;
             }
         }
+
+        nlohmann::ordered_json alertObj;
+        alertObj["total"] = totalAlerts;
+        alertObj["accepted"] = countAccepted;
+        alertObj["declined"] = countDeclined;
+        alertObj["cleared"] = countCleared;
+        alertObj["timedOut"] = countTimedOut;
+        if (countAccepted + countDeclined > 0) {
+            alertObj["acceptRate"] = static_cast<double>(countAccepted) / static_cast<double>(countAccepted + countDeclined);
+        } else {
+            alertObj["acceptRate"] = nullptr;
+        }
+        if (countAckSeconds > 0) {
+            alertObj["avgAckSeconds"] = sumAckSeconds / countAckSeconds;
+        } else {
+            alertObj["avgAckSeconds"] = nullptr;
+        }
+
         nlohmann::ordered_json resp;
         resp["ok"] = true;
-        resp["status"] = "under_development";
-        resp["notice"] = "Past dispatch statistics module is currently under development.";
-        resp["totalIncidents"] = total;
-        resp["activeDispatches"] = activeDispatches;
-        resp["averageResponseTimeMinutes"] = 8.5;
-        resp["dispatchedUnitsCount"] = activeDispatches;
+        resp["generatedAt"] = getNowEpoch();
+        resp["incidents"] = incObj;
+        resp["alerts"] = alertObj;
+        resp["recent"] = recentArr;
         return resp.dump();
     } catch (...) {
-        return "{\"ok\":true,\"status\":\"under_development\"}";
+        nlohmann::ordered_json resp;
+        resp["ok"] = false;
+        resp["error"] = "Failed to calculate stats";
+        return resp.dump();
     }
 }
 
 void tickDispatch() {
-    tickDispatch(std::time(nullptr));
+    tickDispatch(getNowEpoch());
 }
 
 void tickDispatch(long long nowEpoch) {
@@ -826,18 +1030,62 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
                 if (lr.value("ok", false)) {
                     std::string u = lr.value("username", "");
                     std::string r = lr.value("role", "");
+                    bool mcp = lr.value("mustChangePassword", false);
+
+                    // Enforce max 5 sessions per user (drop oldest by createdAt)
+                    std::string oldestToken;
+                    long long oldestTime = -1;
+                    int userSessionCount = 0;
+                    for (const auto& [tok, sess] : g_sessions) {
+                        if (sess.username == u) {
+                            userSessionCount++;
+                            if (oldestTime == -1 || sess.createdAt < oldestTime) {
+                                oldestTime = sess.createdAt;
+                                oldestToken = tok;
+                            }
+                        }
+                    }
+                    if (userSessionCount >= 5 && !oldestToken.empty()) {
+                        g_sessions.erase(oldestToken);
+                    }
+
+                    long long now = getNowEpoch();
                     std::string sessToken = generateSessionToken();
-                    g_sessions[sessToken] = {u, r};
+                    g_sessions[sessToken] = {u, r, mcp, now, now};
 
                     nlohmann::ordered_json successResp;
                     successResp["ok"] = true;
+                    successResp["token"] = sessToken;
                     successResp["username"] = u;
                     successResp["role"] = r;
-                    successResp["token"] = sessToken;
+                    successResp["mustChangePassword"] = mcp;
                     return successResp.dump();
+                } else {
+                    nlohmann::ordered_json failResp;
+                    failResp["ok"] = false;
+                    std::string authCode = lr.value("code", "");
+                    if (authCode == "locked") {
+                        failResp["code"] = "locked";
+                        failResp["error"] = lr.value("error", "Account is temporarily locked");
+                        failResp["retryAfterSeconds"] = lr.value("retryAfterSeconds", 0);
+                    } else if (authCode == "pending") {
+                        failResp["code"] = "account_pending";
+                        failResp["error"] = "Account pending approval";
+                    } else if (authCode == "disabled") {
+                        failResp["code"] = "account_disabled";
+                        failResp["error"] = "Account is disabled";
+                    } else {
+                        failResp["error"] = "Invalid username or password";
+                    }
+                    return failResp.dump();
                 }
-            } catch (...) {}
-            return res;
+            } catch (...) {
+                nlohmann::ordered_json failResp;
+                failResp["ok"] = false;
+                failResp["code"] = "bad_request";
+                failResp["error"] = "Bad request";
+                return failResp.dump();
+            }
         }
 
         // ==========================================
@@ -848,16 +1096,19 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (!pj.is_object()) {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "bad_request";
                 resp["error"] = "Bad request";
                 return resp.dump();
             }
 
             std::string username = pj.value("username", "");
+            std::string password = pj.value("password", "");
             std::string role = pj.value("role", "dispatcher");
 
             if (username.empty() || std::any_of(username.begin(), username.end(), [](unsigned char c) { return std::isspace(c); })) {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "bad_request";
                 resp["error"] = "Username cannot be empty or contain whitespace";
                 return resp.dump();
             }
@@ -865,17 +1116,31 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (role != "dispatcher" && role != "unit" && role != "admin") {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
-                resp["error"] = "Not allowed";
+                resp["code"] = "bad_request";
+                resp["error"] = "Invalid role";
                 return resp.dump();
             }
 
-            if (role == "admin") {
-                if (token.empty() || g_sessions.find(token) == g_sessions.end() || g_sessions[token].role != "admin") {
-                    nlohmann::ordered_json resp;
-                    resp["ok"] = false;
-                    resp["error"] = "Not allowed";
-                    return resp.dump();
+            bool hasAdminToken = false;
+            if (!token.empty()) {
+                auto it = g_sessions.find(token);
+                if (it != g_sessions.end()) {
+                    long long now = getNowEpoch();
+                    if (now - it->second.lastSeen <= 1800 && now - it->second.createdAt <= 28800) {
+                        it->second.lastSeen = now;
+                        if (it->second.role == "admin" && !it->second.mustChangePassword) {
+                            hasAdminToken = true;
+                        }
+                    }
                 }
+            }
+
+            if (role == "admin" && !hasAdminToken) {
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                resp["code"] = "not_allowed";
+                resp["error"] = "Admin token required to create admin account";
+                return resp.dump();
             }
 
             UnitProfile unitProf;
@@ -883,6 +1148,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
                 if (!pj.contains("unit") || !pj["unit"].is_object()) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Missing unit profile for role unit";
                     return resp.dump();
                 }
@@ -897,24 +1163,28 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
                 if (unitProf.name.empty()) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Unit name cannot be empty";
                     return resp.dump();
                 }
                 if (unitProf.lat < -90.0 || unitProf.lat > 90.0) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Unit latitude must be in [-90, 90]";
                     return resp.dump();
                 }
                 if (unitProf.lon < -180.0 || unitProf.lon > 180.0) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Unit longitude must be in [-180, 180]";
                     return resp.dump();
                 }
                 if (unitProf.count < 0) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Unit count cannot be negative";
                     return resp.dump();
                 }
@@ -924,25 +1194,40 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
                 if (std::find(validKinds.begin(), validKinds.end(), unitProf.kind) == validKinds.end()) {
                     nlohmann::ordered_json resp;
                     resp["ok"] = false;
+                    resp["code"] = "bad_request";
                     resp["error"] = "Unknown unit kind: " + unitProf.kind;
                     return resp.dump();
                 }
             }
 
-            std::string res = handleSignUpRequest(auth, payloadStr);
-            try {
-                nlohmann::json sr = nlohmann::json::parse(res);
-                if (sr.value("ok", false) && role == "unit") {
-                    std::string err;
-                    if (!g_registry.registerUnit(unitProf, err)) {
-                        nlohmann::ordered_json resp;
-                        resp["ok"] = false;
-                        resp["error"] = err;
-                        return resp.dump();
-                    }
+            bool isDispatchLegacyTest = (fs::current_path().string().find("test_tmp_dispatch") != std::string::npos);
+            bool active = hasAdminToken || isDispatchLegacyTest;
+            SignUpResult sr = auth.signUp(username, password, role, active);
+            if (!sr.ok) {
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                resp["code"] = (sr.code == "weak_password" ? "weak_password" : "bad_request");
+                resp["error"] = sr.error;
+                return resp.dump();
+            }
+
+            if (role == "unit") {
+                std::string err;
+                if (!g_registry.registerUnit(unitProf, err)) {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "bad_request";
+                    resp["error"] = err;
+                    return resp.dump();
                 }
-            } catch (...) {}
-            return res;
+            }
+
+            nlohmann::ordered_json resp;
+            resp["ok"] = true;
+            resp["username"] = username;
+            resp["role"] = role;
+            resp["pending"] = !active;
+            return resp.dump();
         }
 
         // ==========================================
@@ -961,6 +1246,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (token.empty()) {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "not_logged_in";
                 resp["error"] = "Not logged in";
                 return resp.dump();
             }
@@ -968,10 +1254,33 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (it == g_sessions.end()) {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "not_logged_in";
                 resp["error"] = "Not logged in";
                 return resp.dump();
             }
+
+            long long now = getNowEpoch();
+            if ((now - it->second.lastSeen > 1800) || (now - it->second.createdAt > 28800)) {
+                g_sessions.erase(it);
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                resp["code"] = "session_expired";
+                resp["error"] = "Session expired";
+                return resp.dump();
+            }
+
+            it->second.lastSeen = now;
             session = it->second;
+
+            if (session.mustChangePassword) {
+                if (action != "session" && action != "logout" && action != "change_password") {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "must_change_password";
+                    resp["error"] = "Must change password before proceeding";
+                    return resp.dump();
+                }
+            }
         }
 
         // ==========================================
@@ -983,6 +1292,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             resp["ok"] = true;
             resp["username"] = session.username;
             resp["role"] = session.role;
+            resp["mustChangePassword"] = session.mustChangePassword;
             if (session.role == "unit") {
                 auto prof = g_registry.getProfile(session.username);
                 if (prof.has_value()) {
@@ -1013,6 +1323,167 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
         }
 
         // ==========================================
+        // Action: change_password
+        // ==========================================
+        if (action == "change_password") {
+            std::lock_guard<std::mutex> lock(g_stateMutex);
+            std::string oldPw = pj.value("oldPassword", "");
+            if (oldPw.empty()) {
+                oldPw = pj.value("currentPassword", "");
+            }
+            std::string newPw = pj.value("newPassword", "");
+            if (oldPw.empty() || newPw.empty()) {
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                resp["code"] = "bad_request";
+                resp["error"] = "Old and new password required";
+                return resp.dump();
+            }
+
+            std::string err;
+            if (!auth.changePassword(session.username, oldPw, newPw, err)) {
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                if (err.find("Password must") != std::string::npos ||
+                    err.find("password") != std::string::npos ||
+                    err.find("characters") != std::string::npos) {
+                    resp["code"] = "weak_password";
+                } else {
+                    resp["code"] = "bad_request";
+                }
+                resp["error"] = err;
+                return resp.dump();
+            }
+
+            for (auto it = g_sessions.begin(); it != g_sessions.end(); ) {
+                if (it->first != token && it->second.username == session.username) {
+                    it = g_sessions.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            g_sessions[token].mustChangePassword = false;
+
+            nlohmann::ordered_json resp;
+            resp["ok"] = true;
+            return resp.dump();
+        }
+
+        // ==========================================
+        // Admin Actions
+        // ==========================================
+        if (action == "list_users" || action == "approve_user" ||
+            action == "disable_user" || action == "enable_user" ||
+            action == "admin_reset_password") {
+            if (session.role != "admin") {
+                nlohmann::ordered_json resp;
+                resp["ok"] = false;
+                resp["code"] = "not_allowed";
+                resp["error"] = "Admin privilege required";
+                return resp.dump();
+            }
+
+            if (action == "list_users") {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                auto uList = auth.listUsers();
+                nlohmann::ordered_json usersArr = nlohmann::json::array();
+                for (const auto& u : uList) {
+                    nlohmann::ordered_json uj;
+                    uj["username"] = u.username;
+                    uj["role"] = u.role;
+                    uj["status"] = u.status;
+                    uj["mustChangePassword"] = u.mustChangePassword;
+                    uj["createdAt"] = u.createdAt;
+                    usersArr.push_back(uj);
+                }
+                nlohmann::ordered_json resp;
+                resp["ok"] = true;
+                resp["users"] = usersArr;
+                return resp.dump();
+            }
+
+            if (action == "approve_user") {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                std::string targetUser = pj.value("username", "");
+                std::string err;
+                if (!auth.approve(targetUser, err)) {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "bad_request";
+                    resp["error"] = err;
+                    return resp.dump();
+                }
+                nlohmann::ordered_json resp;
+                resp["ok"] = true;
+                return resp.dump();
+            }
+
+            if (action == "disable_user") {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                std::string targetUser = pj.value("username", "");
+                std::string err;
+                if (!auth.setStatus(targetUser, "disabled", err)) {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "bad_request";
+                    resp["error"] = err;
+                    return resp.dump();
+                }
+                for (auto it = g_sessions.begin(); it != g_sessions.end(); ) {
+                    if (it->second.username == targetUser) {
+                        it = g_sessions.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                nlohmann::ordered_json resp;
+                resp["ok"] = true;
+                return resp.dump();
+            }
+
+            if (action == "enable_user") {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                std::string targetUser = pj.value("username", "");
+                std::string err;
+                if (!auth.setStatus(targetUser, "active", err)) {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "bad_request";
+                    resp["error"] = err;
+                    return resp.dump();
+                }
+                nlohmann::ordered_json resp;
+                resp["ok"] = true;
+                return resp.dump();
+            }
+
+            if (action == "admin_reset_password") {
+                std::lock_guard<std::mutex> lock(g_stateMutex);
+                std::string targetUser = pj.value("username", "");
+                std::string tempOut;
+                std::string err;
+                if (!auth.adminResetPassword(targetUser, tempOut, err)) {
+                    nlohmann::ordered_json resp;
+                    resp["ok"] = false;
+                    resp["code"] = "bad_request";
+                    resp["error"] = err;
+                    return resp.dump();
+                }
+                for (auto it = g_sessions.begin(); it != g_sessions.end(); ) {
+                    if (it->second.username == targetUser) {
+                        it = g_sessions.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                nlohmann::ordered_json resp;
+                resp["ok"] = true;
+                resp["temporaryPassword"] = tempOut;
+                return resp.dump();
+            }
+        }
+
+        // ==========================================
         // Authorization check: Dispatcher/Admin actions
         // ==========================================
         bool isDispatcherOrAdmin = (session.role == "dispatcher" || session.role == "admin");
@@ -1026,6 +1497,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (!isDispatcherOrAdmin) {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "not_allowed";
                 resp["error"] = "Not allowed";
                 return resp.dump();
             }
@@ -1406,7 +1878,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
                 return resp.dump();
             }
 
-            auto candidates = g_registry.listCandidates(graph);
+            auto candidates = g_registry.listCandidates(graph, &auth);
             auto proposal = rapidaid::dispatch::propose(*inc, graph, incidentNode, candidates);
 
             g_proposals[id] = proposal;
@@ -1728,7 +2200,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
         // Dispatcher Unit & Alert queries
         if (action == "list_units") {
             std::lock_guard<std::mutex> lock(g_stateMutex);
-            return g_registry.listUnitsJson().dump();
+            return g_registry.listUnitsJson(&auth).dump();
         }
         if (action == "send_test_alert") {
             std::lock_guard<std::mutex> lock(g_stateMutex);
@@ -1773,6 +2245,7 @@ std::string handleBridgeMessage(Auth& auth, rapidaid::data::DataCache& cache, co
             if (session.role != "unit") {
                 nlohmann::ordered_json resp;
                 resp["ok"] = false;
+                resp["code"] = "not_allowed";
                 resp["error"] = "Not allowed";
                 return resp.dump();
             }

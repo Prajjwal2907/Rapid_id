@@ -30,6 +30,7 @@
  *     - Server errors shown next to the causing control
  *
  * Strict Rule: All server or user text is inserted with textContent, NEVER innerHTML.
+ * Styling: Uses modules.css classes (prefixed board-) with CSS variables for seamless night mode.
  */
 
 (function () {
@@ -62,26 +63,59 @@
   let dom = {};
 
   // ==========================================
-  // Bridge & Map Access Helpers
+  // Session Expiry & Bridge Access Helpers
   // ==========================================
+  function checkSessionExpired(res) {
+    if (!res) return;
+    const code = res.code || (res.error === 'not_logged_in' || res.error === 'session_expired' ? res.error : null);
+    if (code === 'not_logged_in' || code === 'session_expired') {
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('rapidaid:session-expired', { detail: { code: code } }));
+      }
+      stop();
+    }
+  }
+
   async function callBridge(action, payload) {
+    let res = null;
     if (typeof window !== 'undefined' && window.RapidAid && typeof window.RapidAid.callBridge === 'function') {
-      return window.RapidAid.callBridge(action, payload || {});
+      try {
+        res = await window.RapidAid.callBridge(action, payload || {});
+        checkSessionExpired(res);
+        return res;
+      } catch (err) {
+        return { ok: false, error: err.message || 'Error communicating with bridge' };
+      }
     }
     if (typeof window !== 'undefined' && typeof window.callBridge === 'function') {
-      return window.callBridge(action, payload || {});
+      try {
+        res = await window.callBridge(action, payload || {});
+        checkSessionExpired(res);
+        return res;
+      } catch (err) {
+        return { ok: false, error: err.message || 'Error communicating with bridge' };
+      }
     }
     const token = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('rapidaid_token')) || '';
     try {
-      const res = await fetch('/api/bridge', {
+      const httpRes = await fetch('/api/bridge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, token, payload: payload || {} })
       });
-      return await res.json();
+      res = await httpRes.json();
+      checkSessionExpired(res);
+      return res;
     } catch (err) {
       return { ok: false, error: err.message || 'Network error communicating with server' };
     }
+  }
+
+  // Listen for global session-expired events
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('rapidaid:session-expired', function () {
+      stop();
+    });
   }
 
   function getBoardMap() {
@@ -126,7 +160,7 @@
     }
     if (dom.candidatesList) {
       dom.candidatesList.textContent = '';
-      dom.candidatesList.style.display = 'none';
+      dom.candidatesList.classList.remove('board-candidates-list-open');
     }
     resolveLocation(lat, lon, label, 'map_click');
   }
@@ -160,7 +194,7 @@
     if (!query) {
       if (dom.candidatesList) {
         dom.candidatesList.textContent = '';
-        dom.candidatesList.style.display = 'none';
+        dom.candidatesList.classList.remove('board-candidates-list-open');
       }
       return;
     }
@@ -168,12 +202,10 @@
     if (dom.candidatesList) {
       dom.candidatesList.textContent = '';
       const loadingItem = document.createElement('div');
-      loadingItem.style.padding = '8px 10px';
-      loadingItem.style.color = '#777';
-      loadingItem.style.fontSize = '12px';
+      loadingItem.className = 'board-candidate-feedback';
       loadingItem.textContent = 'Searching locations...';
       dom.candidatesList.appendChild(loadingItem);
-      dom.candidatesList.style.display = 'block';
+      dom.candidatesList.classList.add('board-candidates-list-open');
     }
 
     try {
@@ -184,9 +216,7 @@
       if (dom.candidatesList) {
         dom.candidatesList.textContent = '';
         const errItem = document.createElement('div');
-        errItem.style.padding = '8px 10px';
-        errItem.style.color = '#d9534f';
-        errItem.style.fontSize = '12px';
+        errItem.className = 'board-candidate-feedback board-candidate-feedback-error';
         errItem.textContent = 'Search failed: ' + (err.message || 'Server error');
         dom.candidatesList.appendChild(errItem);
       }
@@ -199,12 +229,10 @@
 
     if (!candidates || candidates.length === 0) {
       const emptyItem = document.createElement('div');
-      emptyItem.style.padding = '8px 10px';
-      emptyItem.style.color = '#777';
-      emptyItem.style.fontSize = '12px';
+      emptyItem.className = 'board-candidate-feedback';
       emptyItem.textContent = 'No matching locations found';
       dom.candidatesList.appendChild(emptyItem);
-      dom.candidatesList.style.display = 'block';
+      dom.candidatesList.classList.add('board-candidates-list-open');
       return;
     }
 
@@ -215,41 +243,33 @@
       const source = cand.source || 'search';
 
       const item = document.createElement('div');
-      item.style.padding = '7px 10px';
-      item.style.cursor = 'pointer';
-      item.style.fontSize = '13px';
-      item.style.borderBottom = '1px solid #eee';
+      item.className = 'board-candidate-item';
       item.textContent = label;
 
-      item.addEventListener('mouseenter', () => { item.style.background = '#f0f4f8'; });
-      item.addEventListener('mouseleave', () => { item.style.background = '#ffffff'; });
       item.addEventListener('click', () => {
         if (dom.locSearchInput) dom.locSearchInput.value = label;
         dom.candidatesList.textContent = '';
-        dom.candidatesList.style.display = 'none';
+        dom.candidatesList.classList.remove('board-candidates-list-open');
         resolveLocation(lat, lon, label, source);
       });
 
       dom.candidatesList.appendChild(item);
     });
 
-    dom.candidatesList.style.display = 'block';
+    dom.candidatesList.classList.add('board-candidates-list-open');
   }
 
   async function resolveLocation(lat, lon, labelText, source) {
     if (isNaN(lat) || isNaN(lon)) return;
     isResolvingLocation = true;
-    resolvedLocation = null;
 
     if (dom.btnCreate) {
       dom.btnCreate.disabled = true;
-      dom.btnCreate.style.opacity = '0.6';
-      dom.btnCreate.style.cursor = 'not-allowed';
     }
 
     if (dom.locStatus) {
       dom.locStatus.textContent = 'Snapping location to road network...';
-      dom.locStatus.style.color = '#555';
+      dom.locStatus.className = 'board-loc-status';
     }
 
     ensureMap();
@@ -277,12 +297,10 @@
     } catch (err) {
       if (dom.locStatus) {
         dom.locStatus.textContent = 'Error checking location: ' + (err.message || 'Server error');
-        dom.locStatus.style.color = '#d9534f';
+        dom.locStatus.className = 'board-loc-status board-loc-status-warn';
       }
       if (dom.btnCreate) {
         dom.btnCreate.disabled = true;
-        dom.btnCreate.style.opacity = '0.6';
-        dom.btnCreate.style.cursor = 'not-allowed';
       }
     } finally {
       isResolvingLocation = false;
@@ -296,13 +314,11 @@
     if (!snapRes || snapRes.ok === false) {
       const errSpan = document.createElement('span');
       errSpan.textContent = (snapRes && snapRes.error) ? snapRes.error : 'Location verification failed';
-      errSpan.style.color = '#d9534f';
+      errSpan.className = 'board-loc-status-warn';
       dom.locStatus.appendChild(errSpan);
 
       if (dom.btnCreate) {
         dom.btnCreate.disabled = true;
-        dom.btnCreate.style.opacity = '0.6';
-        dom.btnCreate.style.cursor = 'not-allowed';
       }
       if (snappedCircle && boardLayerGroup) {
         boardLayerGroup.removeLayer(snappedCircle);
@@ -331,22 +347,18 @@
     if (!withinArea) {
       const warnSpan = document.createElement('span');
       warnSpan.textContent = 'Outside mapped area';
-      warnSpan.style.color = '#d9534f';
-      warnSpan.style.fontWeight = 'bold';
+      warnSpan.className = 'board-loc-status-warn';
       dom.locStatus.appendChild(warnSpan);
 
       if (snapMeters !== null) {
         const distSpan = document.createElement('span');
         distSpan.textContent = ' (distance to network: ' + Math.round(snapMeters) + 'm)';
-        distSpan.style.color = '#666';
-        distSpan.style.marginLeft = '6px';
+        distSpan.className = 'board-loc-status';
         dom.locStatus.appendChild(distSpan);
       }
 
       if (dom.btnCreate) {
         dom.btnCreate.disabled = true;
-        dom.btnCreate.style.opacity = '0.6';
-        dom.btnCreate.style.cursor = 'not-allowed';
       }
       if (snappedCircle && boardLayerGroup) {
         boardLayerGroup.removeLayer(snappedCircle);
@@ -363,7 +375,7 @@
         msg += ' -> node [' + Number(snappedLat).toFixed(5) + ', ' + Number(snappedLon).toFixed(5) + ']';
       }
       okSpan.textContent = msg;
-      okSpan.style.color = '#28a745';
+      okSpan.className = 'board-loc-status-ok';
       dom.locStatus.appendChild(okSpan);
 
       ensureMap();
@@ -375,8 +387,8 @@
         } else {
           snappedCircle = window.L.circleMarker([sLat, sLon], {
             radius: 6,
-            color: '#28a745',
-            fillColor: '#28a745',
+            color: '#287a54',
+            fillColor: '#287a54',
             fillOpacity: 0.85
           });
           boardLayerGroup.addLayer(snappedCircle);
@@ -384,28 +396,28 @@
       }
 
       resolvedLocation = {
-        text: labelText || (lat.toFixed(5) + ', ' + lon.toFixed(5)),
+        text: labelText || ('(' + Number(lat).toFixed(5) + ', ' + Number(lon).toFixed(5) + ')'),
         lat: Number(lat),
         lon: Number(lon),
-        source: source || 'map'
+        snappedLat: (snappedLat !== null) ? Number(snappedLat) : Number(lat),
+        snappedLon: (snappedLon !== null) ? Number(snappedLon) : Number(lon),
+        source: source || 'resolved'
       };
 
       if (dom.btnCreate) {
         dom.btnCreate.disabled = false;
-        dom.btnCreate.style.opacity = '1.0';
-        dom.btnCreate.style.cursor = 'pointer';
       }
     }
   }
 
   // ==========================================
-  // Incident Creation
+  // Form Submission
   // ==========================================
   async function handleCreateIncident() {
     if (!resolvedLocation) {
       if (dom.createFeedback) {
-        dom.createFeedback.textContent = 'Please choose a valid location within the operational area';
-        dom.createFeedback.style.color = '#d9534f';
+        dom.createFeedback.textContent = 'Please choose a location within the mapped area.';
+        dom.createFeedback.className = 'board-create-feedback board-create-feedback-err';
       }
       return;
     }
@@ -415,12 +427,12 @@
     }
     if (dom.createFeedback) {
       dom.createFeedback.textContent = 'Creating incident...';
-      dom.createFeedback.style.color = '#555';
+      dom.createFeedback.className = 'board-create-feedback';
     }
 
     const type = dom.typeSelect ? dom.typeSelect.value : 'Medical';
-    const severity = dom.sevInput ? (parseInt(dom.sevInput.value, 10) || 3) : 3;
-    const peopleAffected = dom.peopleInput ? (parseInt(dom.peopleInput.value, 10) || 0) : 0;
+    const severity = dom.sevInput ? parseInt(dom.sevInput.value, 10) || 3 : 3;
+    const peopleAffected = dom.peopleInput ? parseInt(dom.peopleInput.value, 10) || 0 : 0;
     const description = dom.descInput ? dom.descInput.value.trim() : '';
     const callerName = dom.callerNameInput ? dom.callerNameInput.value.trim() : '';
     const callerPhone = dom.callerPhoneInput ? dom.callerPhoneInput.value.trim() : '';
@@ -429,13 +441,22 @@
       type: type,
       severity: severity,
       peopleAffected: peopleAffected,
+      people_affected: peopleAffected,
       description: description,
       callerName: callerName,
+      caller_name: callerName,
       callerPhone: callerPhone,
+      caller_phone: callerPhone,
+      locationText: resolvedLocation.text,
+      location_text: resolvedLocation.text,
+      lat: resolvedLocation.lat,
+      lon: resolvedLocation.lon,
       location: {
         text: resolvedLocation.text,
         lat: resolvedLocation.lat,
         lon: resolvedLocation.lon,
+        snappedLat: resolvedLocation.snappedLat,
+        snappedLon: resolvedLocation.snappedLon,
         source: resolvedLocation.source
       }
     };
@@ -446,7 +467,7 @@
         resetForm();
         if (dom.createFeedback) {
           dom.createFeedback.textContent = 'Incident created successfully';
-          dom.createFeedback.style.color = '#28a745';
+          dom.createFeedback.className = 'board-create-feedback board-create-feedback-ok';
           setTimeout(() => {
             if (dom.createFeedback && dom.createFeedback.textContent === 'Incident created successfully') {
               dom.createFeedback.textContent = '';
@@ -457,7 +478,7 @@
       } else {
         if (dom.createFeedback) {
           dom.createFeedback.textContent = (res && res.error) ? res.error : 'Failed to create incident';
-          dom.createFeedback.style.color = '#d9534f';
+          dom.createFeedback.className = 'board-create-feedback board-create-feedback-err';
         }
         if (dom.btnCreate) {
           dom.btnCreate.disabled = false;
@@ -466,7 +487,7 @@
     } catch (err) {
       if (dom.createFeedback) {
         dom.createFeedback.textContent = 'Error: ' + (err.message || 'Server error');
-        dom.createFeedback.style.color = '#d9534f';
+        dom.createFeedback.className = 'board-create-feedback board-create-feedback-err';
       }
       if (dom.btnCreate) {
         dom.btnCreate.disabled = false;
@@ -484,15 +505,13 @@
     if (dom.locSearchInput) dom.locSearchInput.value = '';
     if (dom.candidatesList) {
       dom.candidatesList.textContent = '';
-      dom.candidatesList.style.display = 'none';
+      dom.candidatesList.classList.remove('board-candidates-list-open');
     }
     if (dom.locStatus) dom.locStatus.textContent = '';
     resolvedLocation = null;
 
     if (dom.btnCreate) {
       dom.btnCreate.disabled = true;
-      dom.btnCreate.style.opacity = '0.6';
-      dom.btnCreate.style.cursor = 'not-allowed';
     }
 
     if (pickerMarker && boardLayerGroup) {
@@ -519,86 +538,67 @@
 
   function getCoordinates(inc) {
     if (!inc) return null;
-    if (inc.location && typeof inc.location.lat === 'number' && typeof inc.location.lon === 'number') {
-      return [inc.location.lat, inc.location.lon];
+    if (inc.lat !== undefined && inc.lon !== undefined && !isNaN(Number(inc.lat)) && !isNaN(Number(inc.lon))) {
+      return [Number(inc.lat), Number(inc.lon)];
     }
-    if (inc.location && typeof inc.location.lat === 'number' && typeof inc.location.lng === 'number') {
-      return [inc.location.lat, inc.location.lng];
-    }
-    if (typeof inc.lat === 'number' && typeof inc.lon === 'number') {
-      return [inc.lat, inc.lon];
-    }
-    if (typeof inc.lat === 'number' && typeof inc.lng === 'number') {
-      return [inc.lat, inc.lng];
-    }
-    if (typeof inc.latitude === 'number' && typeof inc.longitude === 'number') {
-      return [inc.latitude, inc.longitude];
+    if (inc.location && inc.location.lat !== undefined && inc.location.lon !== undefined) {
+      return [Number(inc.location.lat), Number(inc.location.lon)];
     }
     return null;
   }
 
   function getWaitingMinutes(inc) {
     if (!inc) return 0;
-    if (inc.waitingMinutes !== undefined && inc.waitingMinutes !== null) return inc.waitingMinutes;
-    if (inc.waiting_minutes !== undefined && inc.waiting_minutes !== null) return inc.waiting_minutes;
-    const ts = inc.createdAt || inc.created_at || inc.timestamp || inc.time;
-    if (ts) {
-      const timeMs = (typeof ts === 'number') ? (ts > 1e11 ? ts : ts * 1000) : new Date(ts).getTime();
-      if (!isNaN(timeMs)) {
-        return Math.max(0, Math.floor((Date.now() - timeMs) / 60000));
-      }
-    }
-    return 0;
+    if (inc.waitingMinutes !== undefined) return Math.max(0, Math.floor(inc.waitingMinutes));
+    if (inc.waiting_minutes !== undefined) return Math.max(0, Math.floor(inc.waiting_minutes));
+    const now = Math.floor(Date.now() / 1000);
+    const created = inc.createdAt || inc.created_at || inc.createdTime || inc.created_time || now;
+    return Math.max(0, Math.floor((now - Number(created)) / 60));
   }
 
   async function fetchIncidents() {
     if (isFetchingIncidents) return;
-    if (activeEditIncidentId !== null) {
-      // Defer queue DOM replacement while user is actively typing in edit controls
-      return;
-    }
     isFetchingIncidents = true;
 
     try {
-      const res = await callBridge('list_incidents', {});
-      if (res && res.ok === false) {
-        if (dom.queueError) {
-          dom.queueError.textContent = res.error || 'Failed to list incidents';
-          dom.queueError.style.display = 'block';
-        }
-        return;
-      }
+      const res = await callBridge('list_incidents');
       if (dom.queueError) {
         dom.queueError.textContent = '';
-        dom.queueError.style.display = 'none';
+        dom.queueError.classList.remove('board-queue-error-visible');
       }
 
       let incidents = [];
-      if (Array.isArray(res)) {
+      if (res && res.ok && Array.isArray(res.incidents)) {
+        incidents = res.incidents;
+      } else if (Array.isArray(res)) {
         incidents = res;
-      } else if (res && typeof res === 'object') {
-        incidents = res.incidents || res.results || res.data || [];
+      } else if (res && Array.isArray(res.data)) {
+        incidents = res.data;
+      } else if (res && !res.ok) {
+        if (dom.queueError) {
+          dom.queueError.textContent = (res.error) ? res.error : 'Failed to fetch incident queue';
+          dom.queueError.classList.add('board-queue-error-visible');
+        }
       }
 
       currentIncidents = incidents;
-      renderQueueTable(incidents);
+      renderIncidentQueue(incidents);
       updateIncidentMapMarkers(incidents);
 
       if (dom.queueStatus) {
-        const d = new Date();
-        dom.queueStatus.textContent = 'Polled at ' + d.toLocaleTimeString();
+        dom.queueStatus.textContent = 'Queue updated: ' + (new Date()).toLocaleTimeString() + ' (' + incidents.length + ' incidents)';
       }
     } catch (err) {
       if (dom.queueError) {
-        dom.queueError.textContent = 'Queue poll error: ' + (err.message || 'Server error');
-        dom.queueError.style.display = 'block';
+        dom.queueError.textContent = 'Network error fetching incidents: ' + (err.message || 'Server error');
+        dom.queueError.classList.add('board-queue-error-visible');
       }
     } finally {
       isFetchingIncidents = false;
     }
   }
 
-  function renderQueueTable(incidents) {
+  function renderIncidentQueue(incidents) {
     if (!dom.queueTbody) return;
     dom.queueTbody.textContent = '';
 
@@ -606,9 +606,7 @@
       const tr = document.createElement('tr');
       const td = document.createElement('td');
       td.setAttribute('colspan', '9');
-      td.style.padding = '14px';
-      td.style.textAlign = 'center';
-      td.style.color = '#777';
+      td.className = 'board-td';
       td.textContent = 'No active incidents in queue.';
       tr.appendChild(td);
       dom.queueTbody.appendChild(tr);
@@ -618,89 +616,70 @@
     incidents.forEach((inc) => {
       const tr = document.createElement('tr');
       tr.id = 'incident-row-' + inc.id;
-      tr.style.borderBottom = '1px solid #ddd';
-      tr.style.cursor = 'pointer';
+      tr.className = 'board-row';
 
       // 1. Priority
       const tdPrio = document.createElement('td');
-      tdPrio.style.padding = '8px';
+      tdPrio.className = 'board-td';
       const spPrio = document.createElement('span');
       const prioVal = String(inc.priority !== undefined ? inc.priority : 'Normal');
       spPrio.textContent = prioVal;
-      spPrio.style.fontWeight = 'bold';
       const pLower = prioVal.toLowerCase();
+      let prioClass = 'board-prio-normal';
       if (pLower.includes('critical') || prioVal === '1') {
-        spPrio.style.color = '#d9534f';
+        prioClass = 'board-prio-critical';
       } else if (pLower.includes('high') || prioVal === '2') {
-        spPrio.style.color = '#e67e22';
-      } else {
-        spPrio.style.color = '#0066cc';
+        prioClass = 'board-prio-high';
       }
+      spPrio.className = 'board-prio ' + prioClass;
       tdPrio.appendChild(spPrio);
       tr.appendChild(tdPrio);
 
       // 2. Type
       const tdType = document.createElement('td');
-      tdType.style.padding = '8px';
+      tdType.className = 'board-td';
       tdType.textContent = inc.type || '-';
       tr.appendChild(tdType);
 
       // 3. Severity
       const tdSev = document.createElement('td');
-      tdSev.style.padding = '8px';
+      tdSev.className = 'board-td';
       tdSev.id = 'cell-severity-' + inc.id;
       tdSev.textContent = String(inc.severity !== undefined ? inc.severity : '-');
       tr.appendChild(tdSev);
 
       // 4. People Affected
       const tdPeople = document.createElement('td');
-      tdPeople.style.padding = '8px';
+      tdPeople.className = 'board-td';
       tdPeople.id = 'cell-people-' + inc.id;
       tdPeople.textContent = String(inc.peopleAffected !== undefined ? inc.peopleAffected : (inc.people_affected !== undefined ? inc.people_affected : 0));
       tr.appendChild(tdPeople);
 
       // 5. Location Text
       const tdLoc = document.createElement('td');
-      tdLoc.style.padding = '8px';
+      tdLoc.className = 'board-td';
       tdLoc.textContent = getLocationText(inc);
       tr.appendChild(tdLoc);
 
       // 6. Waiting Minutes
       const tdWait = document.createElement('td');
-      tdWait.style.padding = '8px';
+      tdWait.className = 'board-td';
       tdWait.textContent = String(getWaitingMinutes(inc)) + ' min';
       tr.appendChild(tdWait);
 
       // 7. Status
       const tdStat = document.createElement('td');
-      tdStat.style.padding = '8px';
+      tdStat.className = 'board-td';
       const spStat = document.createElement('span');
       const statVal = String(inc.status || 'New');
       spStat.textContent = statVal;
-      spStat.style.padding = '2px 6px';
-      spStat.style.borderRadius = '3px';
-      spStat.style.fontSize = '12px';
-      spStat.style.fontWeight = 'bold';
-      const sLower = statVal.toLowerCase();
-      if (sLower === 'new') {
-        spStat.style.background = '#e2f0d9';
-        spStat.style.color = '#385723';
-      } else if (sLower === 'proposed') {
-        spStat.style.background = '#fff2cc';
-        spStat.style.color = '#806000';
-      } else if (sLower.includes('cancel')) {
-        spStat.style.background = '#fce4d6';
-        spStat.style.color = '#c65911';
-      } else {
-        spStat.style.background = '#e8f4fd';
-        spStat.style.color = '#0066cc';
-      }
+      spStat.className = 'status-chip status-chip-' + statVal.toLowerCase();
       tdStat.appendChild(spStat);
       tr.appendChild(tdStat);
 
       // 8. Caller Name / Phone
       const tdCaller = document.createElement('td');
-      tdCaller.style.padding = '8px';
+      tdCaller.className = 'board-td';
       const cName = inc.callerName || inc.caller_name || '';
       const cPhone = inc.callerPhone || inc.caller_phone || '';
       if (cName && cPhone) {
@@ -714,7 +693,7 @@
 
       // 9. Actions Column
       const tdActions = document.createElement('td');
-      tdActions.style.padding = '8px';
+      tdActions.className = 'board-td';
       buildActionButtons(tdActions, inc, tr);
       tr.appendChild(tdActions);
 
@@ -730,23 +709,17 @@
 
   function buildActionButtons(tdActions, inc, mainRow) {
     const errorNoticeSpan = document.createElement('span');
-    errorNoticeSpan.style.marginLeft = '6px';
-    errorNoticeSpan.style.fontSize = '12px';
+    errorNoticeSpan.className = 'board-repropose-notice';
 
     // Show repropose notice if flagged
     if (reproposeNotices[inc.id]) {
       errorNoticeSpan.textContent = 'Press Propose again to re-propose';
-      errorNoticeSpan.style.color = '#e67e22';
-      errorNoticeSpan.style.fontWeight = 'bold';
     }
 
     // "Propose" Button
     const btnPropose = document.createElement('button');
     btnPropose.textContent = 'Propose';
-    btnPropose.style.marginRight = '4px';
-    btnPropose.style.padding = '4px 8px';
-    btnPropose.style.fontSize = '12px';
-    btnPropose.style.cursor = 'pointer';
+    btnPropose.className = 'board-btn-action board-btn-propose';
 
     btnPropose.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -758,8 +731,7 @@
         window.RapidAidDispatch.open(inc.id);
       } else {
         errorNoticeSpan.textContent = 'Dispatch panel not installed';
-        errorNoticeSpan.style.color = '#d9534f';
-        errorNoticeSpan.style.fontWeight = 'normal';
+        errorNoticeSpan.className = 'board-edit-error';
       }
     });
     tdActions.appendChild(btnPropose);
@@ -767,13 +739,7 @@
     // "Cancel" Button
     const btnCancel = document.createElement('button');
     btnCancel.textContent = 'Cancel';
-    btnCancel.style.marginRight = '4px';
-    btnCancel.style.padding = '4px 8px';
-    btnCancel.style.fontSize = '12px';
-    btnCancel.style.cursor = 'pointer';
-    btnCancel.style.background = '#fff0f0';
-    btnCancel.style.borderColor = '#d9534f';
-    btnCancel.style.color = '#c00';
+    btnCancel.className = 'board-btn-action board-btn-cancel';
 
     btnCancel.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -789,12 +755,12 @@
           await fetchIncidents();
         } else {
           errorNoticeSpan.textContent = (res && res.error) ? res.error : 'Failed to cancel';
-          errorNoticeSpan.style.color = '#d9534f';
+          errorNoticeSpan.className = 'board-edit-error';
           btnCancel.disabled = false;
         }
       } catch (err) {
         errorNoticeSpan.textContent = 'Cancel error: ' + (err.message || 'Server error');
-        errorNoticeSpan.style.color = '#d9534f';
+        errorNoticeSpan.className = 'board-edit-error';
         btnCancel.disabled = false;
       }
     });
@@ -806,10 +772,7 @@
     if (canEdit) {
       const btnEdit = document.createElement('button');
       btnEdit.textContent = 'Edit';
-      btnEdit.style.marginRight = '4px';
-      btnEdit.style.padding = '4px 8px';
-      btnEdit.style.fontSize = '12px';
-      btnEdit.style.cursor = 'pointer';
+      btnEdit.className = 'board-btn-action board-btn-edit';
 
       btnEdit.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -834,81 +797,67 @@
 
     const editRow = document.createElement('tr');
     editRow.id = 'edit-subrow-' + inc.id;
-    editRow.style.background = '#f9fafb';
-    editRow.style.borderBottom = '2px solid #ccc';
+    editRow.className = 'board-edit-row';
 
     const editTd = document.createElement('td');
     editTd.setAttribute('colspan', '9');
-    editTd.style.padding = '12px 16px';
+    editTd.className = 'board-td';
 
     const editContainer = document.createElement('div');
-    editContainer.style.display = 'flex';
-    editContainer.style.flexWrap = 'wrap';
-    editContainer.style.gap = '12px';
-    editContainer.style.alignItems = 'center';
+    editContainer.className = 'board-edit-container';
 
     const titleLabel = document.createElement('strong');
     titleLabel.textContent = 'Edit Incident #' + inc.id + ':';
-    titleLabel.style.marginRight = '8px';
+    titleLabel.className = 'board-edit-label';
     editContainer.appendChild(titleLabel);
 
     // Severity Edit
     const sevLabel = document.createElement('label');
+    sevLabel.className = 'board-edit-label';
     sevLabel.textContent = 'Severity (1-5): ';
     const sevInput = document.createElement('input');
     sevInput.type = 'number';
     sevInput.min = '1';
     sevInput.max = '5';
     sevInput.value = String(inc.severity !== undefined ? inc.severity : 3);
-    sevInput.style.width = '55px';
-    sevInput.style.padding = '3px';
+    sevInput.className = 'board-input board-edit-input-sev';
     sevLabel.appendChild(sevInput);
     editContainer.appendChild(sevLabel);
 
     // People Affected Edit
     const peopleLabel = document.createElement('label');
+    peopleLabel.className = 'board-edit-label';
     peopleLabel.textContent = 'People Affected: ';
     const peopleInput = document.createElement('input');
     peopleInput.type = 'number';
     peopleInput.min = '0';
     peopleInput.value = String(inc.peopleAffected !== undefined ? inc.peopleAffected : (inc.people_affected !== undefined ? inc.people_affected : 0));
-    peopleInput.style.width = '65px';
-    peopleInput.style.padding = '3px';
+    peopleInput.className = 'board-input board-edit-input-people';
     peopleLabel.appendChild(peopleInput);
     editContainer.appendChild(peopleLabel);
 
     // Description Edit
     const descLabel = document.createElement('label');
+    descLabel.className = 'board-edit-label';
     descLabel.textContent = 'Description: ';
     const descInput = document.createElement('input');
     descInput.type = 'text';
     descInput.value = inc.description || '';
-    descInput.style.width = '240px';
-    descInput.style.padding = '3px';
+    descInput.className = 'board-input board-edit-input-desc';
     descLabel.appendChild(descInput);
     editContainer.appendChild(descLabel);
 
     // Save & Cancel Buttons
     const btnSave = document.createElement('button');
     btnSave.textContent = 'Save';
-    btnSave.style.padding = '4px 12px';
-    btnSave.style.background = '#28a745';
-    btnSave.style.color = '#fff';
-    btnSave.style.border = 'none';
-    btnSave.style.borderRadius = '3px';
-    btnSave.style.cursor = 'pointer';
-    btnSave.style.fontWeight = 'bold';
+    btnSave.className = 'board-btn-save';
 
     const btnClose = document.createElement('button');
     btnClose.textContent = 'Close';
-    btnClose.style.padding = '4px 10px';
-    btnClose.style.marginLeft = '4px';
-    btnClose.style.cursor = 'pointer';
+    btnClose.className = 'board-btn-action board-btn-close';
 
     const editErrorSpan = document.createElement('span');
-    editErrorSpan.style.color = '#d9534f';
-    editErrorSpan.style.fontSize = '12px';
-    editErrorSpan.style.marginLeft = '8px';
+    editErrorSpan.className = 'board-edit-error';
 
     btnSave.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -966,10 +915,10 @@
 
   function highlightAndCenterIncident(inc, tr) {
     if (highlightedRow && highlightedRow !== tr) {
-      highlightedRow.style.background = '';
+      highlightedRow.classList.remove('board-row-highlighted');
     }
     highlightedRow = tr;
-    tr.style.background = '#e8f4fd';
+    tr.classList.add('board-row-highlighted');
 
     const coords = getCoordinates(inc);
     if (!coords) return;
@@ -1009,47 +958,42 @@
       } else {
         const m = window.L.marker(coords);
         m.bindPopup(popupText);
-        m.bindTooltip('#' + inc.id + ' ' + (inc.type || 'Incident'));
+        m.on('click', () => {
+          const row = document.getElementById('incident-row-' + inc.id);
+          if (row) {
+            highlightAndCenterIncident(inc, row);
+            try { row.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) {}
+          }
+        });
         boardLayerGroup.addLayer(m);
         incidentMarkers[inc.id] = m;
       }
     });
 
-    // Remove stale markers
     Object.keys(incidentMarkers).forEach((id) => {
       if (!seenIds[id]) {
-        try {
-          boardLayerGroup.removeLayer(incidentMarkers[id]);
-        } catch (e) {}
+        try { boardLayerGroup.removeLayer(incidentMarkers[id]); } catch (e) {}
         delete incidentMarkers[id];
       }
     });
   }
 
   // ==========================================
-  // DOM Construction (Plain HTML & Inline Styles)
+  // DOM Construction (Semantic HTML & Classes)
   // ==========================================
   function buildBoardUI(mountEl) {
     const container = document.createElement('div');
     container.id = 'rapidaid-board-root';
-    container.style.fontFamily = 'sans-serif';
-    container.style.lineHeight = '1.5';
-    container.style.color = '#333';
+    container.className = 'board-root';
 
     // ------------------------------------------
     // (a) New Incident Form Section
     // ------------------------------------------
     const formSection = document.createElement('section');
-    formSection.style.background = '#fafafa';
-    formSection.style.border = '1px solid #ccc';
-    formSection.style.borderRadius = '4px';
-    formSection.style.padding = '18px';
-    formSection.style.marginBottom = '24px';
+    formSection.className = 'board-form-section';
 
     const formHeading = document.createElement('h3');
-    formHeading.style.marginTop = '0';
-    formHeading.style.marginBottom = '14px';
-    formHeading.style.color = '#222';
+    formHeading.className = 'board-form-heading';
     formHeading.textContent = 'Report New Emergency Incident';
     formSection.appendChild(formHeading);
 
@@ -1058,24 +1002,17 @@
 
     // Row 1: Type, Severity, People Affected
     const row1 = document.createElement('div');
-    row1.style.display = 'flex';
-    row1.style.gap = '15px';
-    row1.style.flexWrap = 'wrap';
-    row1.style.marginBottom = '12px';
+    row1.className = 'board-form-row';
 
     // Type field
     const typeGroup = document.createElement('div');
-    typeGroup.style.flex = '1.2';
-    typeGroup.style.minWidth = '140px';
+    typeGroup.className = 'board-form-group board-form-group-type';
     const typeLabel = document.createElement('label');
     typeLabel.textContent = 'Incident Type:';
-    typeLabel.style.fontWeight = 'bold';
-    typeLabel.style.display = 'block';
-    typeLabel.style.marginBottom = '4px';
+    typeLabel.className = 'board-form-label';
     const typeSelect = document.createElement('select');
     typeSelect.id = 'board-incident-type';
-    typeSelect.style.width = '100%';
-    typeSelect.style.padding = '6px';
+    typeSelect.className = 'board-select';
     ['Medical', 'Fire', 'Police', 'Other'].forEach((t) => {
       const opt = document.createElement('option');
       opt.value = t;
@@ -1090,22 +1027,17 @@
 
     // Severity field
     const sevGroup = document.createElement('div');
-    sevGroup.style.flex = '0.8';
-    sevGroup.style.minWidth = '110px';
+    sevGroup.className = 'board-form-group board-form-group-sev';
     const sevLabel = document.createElement('label');
     sevLabel.textContent = 'Severity (1-5):';
-    sevLabel.style.fontWeight = 'bold';
-    sevLabel.style.display = 'block';
-    sevLabel.style.marginBottom = '4px';
+    sevLabel.className = 'board-form-label';
     const sevInput = document.createElement('input');
     sevInput.type = 'number';
     sevInput.id = 'board-incident-severity';
     sevInput.min = '1';
     sevInput.max = '5';
     sevInput.value = '3';
-    sevInput.style.width = '100%';
-    sevInput.style.padding = '6px';
-    sevInput.style.boxSizing = 'border-box';
+    sevInput.className = 'board-input';
     sevGroup.appendChild(sevLabel);
     sevGroup.appendChild(sevInput);
     row1.appendChild(sevGroup);
@@ -1113,21 +1045,16 @@
 
     // People Affected field
     const peopleGroup = document.createElement('div');
-    peopleGroup.style.flex = '1';
-    peopleGroup.style.minWidth = '130px';
+    peopleGroup.className = 'board-form-group board-form-group-people';
     const peopleLabel = document.createElement('label');
     peopleLabel.textContent = 'People Affected:';
-    peopleLabel.style.fontWeight = 'bold';
-    peopleLabel.style.display = 'block';
-    peopleLabel.style.marginBottom = '4px';
+    peopleLabel.className = 'board-form-label';
     const peopleInput = document.createElement('input');
     peopleInput.type = 'number';
     peopleInput.id = 'board-incident-people';
     peopleInput.min = '0';
     peopleInput.value = '0';
-    peopleInput.style.width = '100%';
-    peopleInput.style.padding = '6px';
-    peopleInput.style.boxSizing = 'border-box';
+    peopleInput.className = 'board-input';
     peopleGroup.appendChild(peopleLabel);
     peopleGroup.appendChild(peopleInput);
     row1.appendChild(peopleGroup);
@@ -1137,46 +1064,33 @@
 
     // Row 2: Caller Name & Phone
     const row2 = document.createElement('div');
-    row2.style.display = 'flex';
-    row2.style.gap = '15px';
-    row2.style.flexWrap = 'wrap';
-    row2.style.marginBottom = '12px';
+    row2.className = 'board-form-row';
 
     const callerNameGroup = document.createElement('div');
-    callerNameGroup.style.flex = '1';
-    callerNameGroup.style.minWidth = '180px';
+    callerNameGroup.className = 'board-form-group board-form-group-name';
     const callerNameLabel = document.createElement('label');
     callerNameLabel.textContent = 'Caller Name:';
-    callerNameLabel.style.fontWeight = 'bold';
-    callerNameLabel.style.display = 'block';
-    callerNameLabel.style.marginBottom = '4px';
+    callerNameLabel.className = 'board-form-label';
     const callerNameInput = document.createElement('input');
     callerNameInput.type = 'text';
     callerNameInput.id = 'board-incident-caller-name';
     callerNameInput.placeholder = 'e.g. John Doe';
-    callerNameInput.style.width = '100%';
-    callerNameInput.style.padding = '6px';
-    callerNameInput.style.boxSizing = 'border-box';
+    callerNameInput.className = 'board-input';
     callerNameGroup.appendChild(callerNameLabel);
     callerNameGroup.appendChild(callerNameInput);
     row2.appendChild(callerNameGroup);
     dom.callerNameInput = callerNameInput;
 
     const callerPhoneGroup = document.createElement('div');
-    callerPhoneGroup.style.flex = '1';
-    callerPhoneGroup.style.minWidth = '180px';
+    callerPhoneGroup.className = 'board-form-group board-form-group-phone';
     const callerPhoneLabel = document.createElement('label');
     callerPhoneLabel.textContent = 'Caller Phone:';
-    callerPhoneLabel.style.fontWeight = 'bold';
-    callerPhoneLabel.style.display = 'block';
-    callerPhoneLabel.style.marginBottom = '4px';
+    callerPhoneLabel.className = 'board-form-label';
     const callerPhoneInput = document.createElement('input');
     callerPhoneInput.type = 'text';
     callerPhoneInput.id = 'board-incident-caller-phone';
     callerPhoneInput.placeholder = 'e.g. 555-0144';
-    callerPhoneInput.style.width = '100%';
-    callerPhoneInput.style.padding = '6px';
-    callerPhoneInput.style.boxSizing = 'border-box';
+    callerPhoneInput.className = 'board-input';
     callerPhoneGroup.appendChild(callerPhoneLabel);
     callerPhoneGroup.appendChild(callerPhoneInput);
     row2.appendChild(callerPhoneGroup);
@@ -1186,20 +1100,15 @@
 
     // Row 3: Description
     const row3 = document.createElement('div');
-    row3.style.marginBottom = '12px';
+    row3.className = 'board-form-row';
     const descLabel = document.createElement('label');
     descLabel.textContent = 'Incident Description:';
-    descLabel.style.fontWeight = 'bold';
-    descLabel.style.display = 'block';
-    descLabel.style.marginBottom = '4px';
+    descLabel.className = 'board-form-label';
     const descInput = document.createElement('textarea');
     descInput.id = 'board-incident-desc';
     descInput.rows = 2;
     descInput.placeholder = 'Describe incident situation, landmarks, or medical symptoms...';
-    descInput.style.width = '100%';
-    descInput.style.padding = '6px';
-    descInput.style.boxSizing = 'border-box';
-    descInput.style.fontFamily = 'sans-serif';
+    descInput.className = 'board-textarea';
     row3.appendChild(descLabel);
     row3.appendChild(descInput);
     formEl.appendChild(row3);
@@ -1207,27 +1116,23 @@
 
     // Row 4: Location Picker (Search box, Dropdown, Status)
     const row4 = document.createElement('div');
-    row4.style.marginBottom = '14px';
+    row4.className = 'board-form-row';
+    const locGroup = document.createElement('div');
+    locGroup.className = 'board-form-group';
 
     const locLabel = document.createElement('label');
     locLabel.textContent = 'Location (Search or click on the map):';
-    locLabel.style.fontWeight = 'bold';
-    locLabel.style.display = 'block';
-    locLabel.style.marginBottom = '4px';
-    row4.appendChild(locLabel);
+    locLabel.className = 'board-form-label';
+    locGroup.appendChild(locLabel);
 
     const searchBoxContainer = document.createElement('div');
-    searchBoxContainer.style.display = 'flex';
-    searchBoxContainer.style.gap = '8px';
-    searchBoxContainer.style.alignItems = 'center';
+    searchBoxContainer.className = 'board-search-container';
 
     const locSearchInput = document.createElement('input');
     locSearchInput.type = 'text';
     locSearchInput.id = 'board-loc-search';
     locSearchInput.placeholder = 'Type address/landmark or click on the interactive map...';
-    locSearchInput.style.flex = '1';
-    locSearchInput.style.padding = '7px';
-    locSearchInput.style.boxSizing = 'border-box';
+    locSearchInput.className = 'board-input board-search-input';
     locSearchInput.addEventListener('input', handleSearchInput);
     locSearchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -1241,65 +1146,46 @@
     const btnSearch = document.createElement('button');
     btnSearch.type = 'button';
     btnSearch.textContent = 'Search';
-    btnSearch.style.padding = '7px 15px';
-    btnSearch.style.cursor = 'pointer';
+    btnSearch.className = 'board-btn-search';
     btnSearch.addEventListener('click', triggerSearch);
     searchBoxContainer.appendChild(btnSearch);
 
-    row4.appendChild(searchBoxContainer);
+    locGroup.appendChild(searchBoxContainer);
 
     // Candidates dropdown/list container
     const candidatesList = document.createElement('div');
     candidatesList.id = 'board-candidates-list';
-    candidatesList.style.display = 'none';
-    candidatesList.style.background = '#ffffff';
-    candidatesList.style.border = '1px solid #ccc';
-    candidatesList.style.borderRadius = '3px';
-    candidatesList.style.marginTop = '4px';
-    candidatesList.style.maxHeight = '180px';
-    candidatesList.style.overflowY = 'auto';
-    candidatesList.style.boxShadow = '0 3px 6px rgba(0,0,0,0.1)';
-    row4.appendChild(candidatesList);
+    candidatesList.className = 'board-candidates-list';
+    locGroup.appendChild(candidatesList);
     dom.candidatesList = candidatesList;
 
     // Location verification status (coordinates, snap meters, outside mapped area warning)
     const locStatus = document.createElement('div');
     locStatus.id = 'board-loc-status';
-    locStatus.style.marginTop = '6px';
-    locStatus.style.fontSize = '13px';
-    locStatus.style.minHeight = '18px';
-    row4.appendChild(locStatus);
+    locStatus.className = 'board-loc-status';
+    locGroup.appendChild(locStatus);
     dom.locStatus = locStatus;
 
+    row4.appendChild(locGroup);
     formEl.appendChild(row4);
 
     // Row 5: Submit Button and Feedback
     const row5 = document.createElement('div');
-    row5.style.display = 'flex';
-    row5.style.alignItems = 'center';
-    row5.style.gap = '15px';
+    row5.className = 'board-form-row';
 
     const btnCreate = document.createElement('button');
     btnCreate.type = 'button';
     btnCreate.id = 'board-btn-create';
     btnCreate.textContent = 'Create Incident';
     btnCreate.disabled = true;
-    btnCreate.style.padding = '8px 22px';
-    btnCreate.style.fontWeight = 'bold';
-    btnCreate.style.background = '#0066cc';
-    btnCreate.style.color = '#ffffff';
-    btnCreate.style.border = 'none';
-    btnCreate.style.borderRadius = '3px';
-    btnCreate.style.cursor = 'not-allowed';
-    btnCreate.style.opacity = '0.6';
+    btnCreate.className = 'board-btn-create';
     btnCreate.addEventListener('click', handleCreateIncident);
     row5.appendChild(btnCreate);
     dom.btnCreate = btnCreate;
 
     const createFeedback = document.createElement('span');
     createFeedback.id = 'board-create-feedback';
-    createFeedback.style.fontSize = '13px';
-    createFeedback.style.fontWeight = 'bold';
+    createFeedback.className = 'board-create-feedback';
     row5.appendChild(createFeedback);
     dom.createFeedback = createFeedback;
 
@@ -1312,23 +1198,19 @@
     // ------------------------------------------
     const queueSection = document.createElement('section');
     queueSection.id = 'board-queue-section';
+    queueSection.className = 'board-queue-section';
 
     const queueHeader = document.createElement('div');
-    queueHeader.style.display = 'flex';
-    queueHeader.style.justifyContent = 'space-between';
-    queueHeader.style.alignItems = 'center';
-    queueHeader.style.marginBottom = '10px';
+    queueHeader.className = 'board-queue-header';
 
     const queueTitle = document.createElement('h3');
-    queueTitle.style.margin = '0';
-    queueTitle.style.color = '#222';
+    queueTitle.className = 'board-queue-title';
     queueTitle.textContent = 'Incident Queue';
     queueHeader.appendChild(queueTitle);
 
     const queueStatus = document.createElement('span');
     queueStatus.id = 'board-queue-status';
-    queueStatus.style.fontSize = '12px';
-    queueStatus.style.color = '#666';
+    queueStatus.className = 'board-queue-status';
     queueStatus.textContent = 'Initializing...';
     queueHeader.appendChild(queueStatus);
     dom.queueStatus = queueStatus;
@@ -1337,25 +1219,21 @@
 
     const queueError = document.createElement('div');
     queueError.id = 'board-queue-error';
-    queueError.style.display = 'none';
-    queueError.style.color = '#d9534f';
-    queueError.style.fontWeight = 'bold';
-    queueError.style.fontSize = '13px';
-    queueError.style.marginBottom = '8px';
+    queueError.className = 'board-queue-error';
     queueSection.appendChild(queueError);
     dom.queueError = queueError;
 
+    // Responsive table wrapper
+    const tableWrapper = document.createElement('div');
+    tableWrapper.className = 'board-table-responsive';
+
     const table = document.createElement('table');
     table.id = 'board-incidents-table';
-    table.style.width = '100%';
-    table.style.borderCollapse = 'collapse';
-    table.style.fontSize = '13px';
-    table.style.textAlign = 'left';
+    table.className = 'board-table';
 
     const thead = document.createElement('thead');
+    thead.className = 'board-thead';
     const headerRow = document.createElement('tr');
-    headerRow.style.background = '#e9ecef';
-    headerRow.style.borderBottom = '2px solid #ccc';
 
     const headers = [
       'Priority',
@@ -1371,7 +1249,7 @@
 
     headers.forEach((h) => {
       const th = document.createElement('th');
-      th.style.padding = '8px';
+      th.className = 'board-th';
       th.textContent = h;
       headerRow.appendChild(th);
     });
@@ -1383,7 +1261,8 @@
     table.appendChild(tbody);
     dom.queueTbody = tbody;
 
-    queueSection.appendChild(table);
+    tableWrapper.appendChild(table);
+    queueSection.appendChild(tableWrapper);
     container.appendChild(queueSection);
 
     mountEl.appendChild(container);

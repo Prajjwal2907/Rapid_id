@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <thread>
+#include <mutex>
 #include <cctype>
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,9 @@ namespace rapidaid::geo {
     }
 
     void Geocoder::enforceRateLimit() {
+        static std::mutex rateLimitMutex;
+        std::lock_guard<std::mutex> lock(rateLimitMutex);
+
         static std::chrono::steady_clock::time_point lastCall;
         static bool initialized = false;
 

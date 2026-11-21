@@ -126,6 +126,47 @@ int main() {
         }
     }
 
+    // Case 8: saveSecret saves content and sets owner-only permissions (POSIX) / succeeds on Windows
+    {
+        std::string secretPath = testDir + "/secret_file.key";
+        std::string secretData = "super_secret_pepper_value_1234567890\n";
+        if (FileStore::saveSecret(secretPath, secretData)) {
+            std::string loaded = FileStore::load(secretPath);
+            if (loaded == secretData) {
+                std::cout << "[PASS] Case 8: saveSecret saves and loads content correctly\n";
+            } else {
+                std::cout << "[FAIL] Case 8: saveSecret content mismatch\n";
+                failed++;
+            }
+
+            // Verify overwriting with saveSecret
+            std::string updatedSecret = "new_secret_key_abcdef9876543210\n";
+            if (FileStore::saveSecret(secretPath, updatedSecret) && FileStore::load(secretPath) == updatedSecret) {
+                std::cout << "[PASS] Case 8: saveSecret overwrites existing secret\n";
+            } else {
+                std::cout << "[FAIL] Case 8: saveSecret failed to overwrite\n";
+                failed++;
+            }
+
+#ifndef _WIN32
+            auto perms = std::filesystem::status(secretPath).permissions();
+            using p = std::filesystem::perms;
+            bool ownerOnly = ((perms & p::all) == (p::owner_read | p::owner_write));
+            if (ownerOnly) {
+                std::cout << "[PASS] Case 8: saveSecret owner-only permissions enforced on POSIX\n";
+            } else {
+                std::cout << "[FAIL] Case 8: saveSecret permissions mismatch on POSIX\n";
+                failed++;
+            }
+#else
+            std::cout << "[PASS] Case 8: saveSecret best-effort verified on Windows\n";
+#endif
+        } else {
+            std::cout << "[FAIL] Case 8: saveSecret failed\n";
+            failed++;
+        }
+    }
+
     // Cleanup temp directory
     std::filesystem::remove_all(testDir, ec);
     if (!std::filesystem::exists(testDir)) {
