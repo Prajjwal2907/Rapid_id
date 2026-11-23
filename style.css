@@ -474,14 +474,28 @@ select:focus {
 }
 
 #board-map {
+  position: relative;
   width: 100%;
   height: 480px;
+  min-height: 480px;
   margin-bottom: 24px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--panel-alt);
   box-shadow: var(--shadow);
   z-index: 1;
+}
+
+.board-map-load-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: var(--panel-alt);
+  z-index: 1000;
+  position: relative;
 }
 
 .map-legend {
@@ -541,7 +555,6 @@ select:focus {
   box-shadow: var(--shadow);
 }
 
-#section-incidents > div,
 #section-stats > div {
   width: 100%;
   display: flex;
@@ -549,6 +562,24 @@ select:focus {
   align-items: center;
   min-height: 60vh;
   text-align: center;
+}
+
+#section-incidents {
+  display: block;
+  text-align: left;
+}
+
+#section-incidents > #board-mount,
+#section-incidents > #dispatch-mount,
+#section-incidents > #board-map {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+#board-mount,
+#dispatch-mount {
+  display: block;
 }
 
 #section-incidents h1,

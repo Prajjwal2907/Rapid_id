@@ -243,8 +243,10 @@ std::string HttpGuard::contentTypeFor(const std::string& path) {
 std::string HttpGuard::contentSecurityPolicy() {
     return "default-src 'self'; script-src 'self' https://unpkg.com; "
            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-           "img-src 'self' data: blob: https://unpkg.com https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org; "
-           "connect-src 'self' https://photon.komoot.io https://nominatim.openstreetmap.org; "
+           "img-src 'self' data: blob: https://unpkg.com https://*.basemaps.cartocdn.com "
+           "https://tile.openstreetmap.org https://*.tile.openstreetmap.org; "
+           "connect-src 'self' https://unpkg.com https://photon.komoot.io "
+           "https://nominatim.openstreetmap.org; "
            "frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 }
 

@@ -186,11 +186,9 @@ function initActiveBoardModules() {
 }
 
 function startBoardModules() {
-  const bMap = window.RapidAid.getBoardMap();
-  if (bMap) {
-    setTimeout(() => bMap.invalidateSize(), 150);
-  }
   initActiveBoardModules();
+  const bMap = window.RapidAid.getBoardMap();
+  refreshMapSize(bMap);
 }
 
 function stopBoardModules() {
@@ -684,9 +682,19 @@ function renderGeoJsonOnMap(mapInstance, roadsGeoJson, placesGeoJson, layerHolde
 function ensureLeafletMap() {
   const container = document.getElementById('leaflet-map');
   if (!container) return;
+  if (!window.L || typeof window.L.map !== 'function') {
+    setTimeout(() => ensureLeafletMap(), 100);
+    return;
+  }
 
   if (state.leafletMap) {
-    setTimeout(() => state.leafletMap.invalidateSize(), 150);
+    refreshMapSize(state.leafletMap);
+    return;
+  }
+
+  const rect = container.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    setTimeout(() => ensureLeafletMap(), 100);
     return;
   }
 
@@ -699,18 +707,37 @@ function ensureLeafletMap() {
     renderGeoJsonOnMap(state.leafletMap, state.roadsGeoJson, state.placesGeoJson, state.areaLayers);
   }
 
-  setTimeout(() => state.leafletMap.invalidateSize(), 200);
+  refreshMapSize(state.leafletMap);
 }
 
 function ensureBoardMap() {
   const container = document.getElementById('board-map');
   if (!container) return null;
+  if (!window.L || typeof window.L.map !== 'function') {
+    let status = document.getElementById('board-map-load-status');
+    if (!status) {
+      status = document.createElement('div');
+      status.id = 'board-map-load-status';
+      status.className = 'board-map-load-status';
+      status.textContent = 'Loading map library...';
+      container.appendChild(status);
+    }
+    setTimeout(() => ensureBoardMap(), 100);
+    return null;
+  }
+
+  const status = document.getElementById('board-map-load-status');
+  if (status) status.remove();
 
   if (state.boardMap) {
-    setTimeout(() => {
-      if (state.boardMap) state.boardMap.invalidateSize();
-    }, 100);
+    refreshMapSize(state.boardMap);
     return state.boardMap;
+  }
+
+  const rect = container.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    setTimeout(() => ensureBoardMap(), 100);
+    return null;
   }
 
   state.boardMap = L.map('board-map', { preferCanvas: true }).setView([state.centerLat, state.centerLon], 14);
@@ -720,11 +747,19 @@ function ensureBoardMap() {
     renderGeoJsonOnMap(state.boardMap, state.roadsGeoJson, state.placesGeoJson, state.boardLayers);
   }
 
-  setTimeout(() => {
-    if (state.boardMap) state.boardMap.invalidateSize();
-  }, 150);
+  refreshMapSize(state.boardMap);
 
   return state.boardMap;
+}
+
+function refreshMapSize(mapInstance) {
+  if (!mapInstance) return;
+  [0, 50, 150, 350].forEach((delay) => {
+    setTimeout(() => {
+      if (!mapInstance || typeof mapInstance.invalidateSize !== 'function') return;
+      mapInstance.invalidateSize({ pan: false });
+    }, delay);
+  });
 }
 
 function updateMapVisuals(displayName, lat, lon, radiusMeters) {

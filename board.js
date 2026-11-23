@@ -147,6 +147,13 @@
       }
       currentMap.on('click', onMapClick);
     }
+    if (map && typeof map.invalidateSize === 'function') {
+      [0, 100, 300].forEach((delay) => {
+        setTimeout(() => {
+          if (map === currentMap) map.invalidateSize({ pan: false });
+        }, delay);
+      });
+    }
     return currentMap;
   }
 

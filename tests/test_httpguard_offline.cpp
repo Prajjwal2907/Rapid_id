@@ -165,6 +165,11 @@ int main() {
 
         std::string htmlHeaders = HttpGuard::securityHeaders("/index.html");
         check(htmlHeaders.find("Content-Security-Policy:") != std::string::npos, "Headers contain CSP", failed);
+        std::string csp = HttpGuard::contentSecurityPolicy();
+        check(csp.find("https://unpkg.com") != std::string::npos, "CSP allows Leaflet assets from unpkg", failed);
+        check(csp.find("connect-src 'self' https://unpkg.com") != std::string::npos, "CSP allows Leaflet source-map connections from unpkg", failed);
+        check(csp.find("https://*.tile.openstreetmap.org") != std::string::npos, "CSP allows OpenStreetMap tile hosts", failed);
+        check(csp.find("https://*.basemaps.cartocdn.com") != std::string::npos, "CSP allows CARTO tile hosts", failed);
         check(htmlHeaders.find("X-Content-Type-Options: nosniff") != std::string::npos, "Headers contain nosniff", failed);
         check(htmlHeaders.find("X-Frame-Options: DENY") != std::string::npos, "Headers contain DENY frame options", failed);
         check(htmlHeaders.find("Referrer-Policy: no-referrer") != std::string::npos, "Headers contain Referrer-Policy", failed);
